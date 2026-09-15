@@ -1,23 +1,32 @@
 # Gesture Mappings
 
-Default bindings from `default_action_map()` in [src/gesture_os/actions.py](src/gesture_os/actions.py).
-Gestures are classified in [src/gesture_os/recognizer.py](src/gesture_os/recognizer.py) by the number
-of extended fingers on one hand.
+Default bindings from `default_action_map()` in [src/gesture_os/actions.py](src/gesture_os/actions.py),
+plus two bound directly in [src/gesture_os/ui/app.py](src/gesture_os/ui/app.py) since they control
+app state rather than firing a stateless OS action. Gestures are classified in
+[src/gesture_os/recognizer.py](src/gesture_os/recognizer.py) by the number of extended fingers on
+one hand.
 
-| Gesture      | Hand shape                        | Extended fingers | OS action    |
-| ------------ | ---------------------------------- | :---------------: | ------------ |
-| `fist`       | closed hand                        | 0                  | Mute volume  |
-| `point`      | index finger only                  | 1                  | Volume up    |
-| `peace`      | index + middle finger               | 2                  | Volume down  |
-| `open_palm`  | all five fingers extended          | 5                  | Play / pause |
-| `unknown`    | any other count (3 or 4 fingers)   | 3, 4               | No action    |
+| Gesture      | Hand shape                        | Extended fingers | Action                |
+| ------------ | ---------------------------------- | :---------------: | --------------------- |
+| `fist`       | closed hand                        | 0                  | **Pause** gaze cursor |
+| `point`      | index finger only                  | 1                  | Volume up             |
+| `peace`      | index + middle finger               | 2                  | Volume down           |
+| `open_palm`  | all five fingers extended          | 5                  | **Resume** gaze cursor|
+| `unknown`    | any other count (3 or 4 fingers)   | 3, 4               | No action              |
+
+Pausing/resuming only stops cursor *movement* — the video feed, iris tracking, and its debug
+overlay keep running the whole time, and fist/peace/point still fire while paused. Current state
+shows in its own "gaze: active/paused" label in the app window (see Cursor movement below), kept
+separate from the general status line so it's never overwritten by other status messages.
 
 ## Adding or changing a binding
 
 1. Extend the finger-count → gesture name mapping in `HandGestureRecognizer.classify`
    (`src/gesture_os/recognizer.py`) if you're introducing a new gesture.
-2. Bind the gesture name to a `pyautogui` call in `default_action_map()`
-   (`src/gesture_os/actions.py`).
+2. For a stateless OS action, bind the gesture name to a `pyautogui` call in `default_action_map()`
+   (`src/gesture_os/actions.py`). For one that needs app state (like pause/resume), bind it instead
+   in `GestureOsApp.__init__` (`src/gesture_os/ui/app.py`), overriding `default_action_map()`'s
+   result before constructing `ActionDispatcher`.
 
 Keep any new gesture-detection logic in the pure-function layer (alongside
 `count_extended_fingers`) so it stays unit-testable without a camera — see
@@ -45,8 +54,8 @@ cursor nudge via `pyautogui.moveRel`, scaled by two knobs:
 - `sensitivity` (default `20.0`) — pixels moved per unit of offset past the deadzone.
 
 Moving the real mouse to a screen corner is pyautogui's built-in panic button — it stops gaze
-cursor movement (the app catches `FailSafeException` and falls back to uncalibrated mode) if it
-ever goes out of control.
+cursor movement outright (the app catches `FailSafeException` and pauses, same as a fist gesture)
+if it ever goes out of control. Make an `open_palm` gesture to resume.
 
 `draw_debug_overlay` draws exactly what's being tracked onto the live video feed in the app
 window: a green dot on each eye-socket landmark, a red dot on each iris center. MediaPipe itself

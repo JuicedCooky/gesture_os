@@ -10,10 +10,13 @@ GestureAction = Callable[[], None]
 
 
 def default_action_map() -> dict[str, GestureAction]:
-    """The built-in gesture -> OS action bindings."""
+    """The built-in gesture -> OS action bindings.
+
+    `fist`/`open_palm` are deliberately absent here: the app binds those to
+    pausing/resuming gaze cursor control instead (see GestureOsApp), which
+    needs access to app state a stateless action map can't hold.
+    """
     return {
-        "open_palm": lambda: pyautogui.press("playpause"),
-        "fist": lambda: pyautogui.press("volumemute"),
         "point": lambda: pyautogui.press("volumeup"),
         "peace": lambda: pyautogui.press("volumedown"),
     }

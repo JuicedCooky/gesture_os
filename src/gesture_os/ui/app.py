@@ -15,7 +15,7 @@ import cv2
 import pyautogui
 from PIL import Image, ImageTk
 
-from gesture_os.actions import ActionDispatcher, CursorController
+from gesture_os.actions import ActionDispatcher, CursorController, default_action_map
 from gesture_os.calibration import GazeCalibration, load_calibration
 from gesture_os.capture import WebcamCapture
 from gesture_os.gaze import FaceGazeTracker, draw_debug_overlay, iris_offset
@@ -37,15 +37,21 @@ class GestureOsApp:
 
         self.status_var = tk.StringVar(value="stopped")
         ttk.Label(self.root, textvariable=self.status_var).pack()
+        self.gaze_status_var = tk.StringVar(value="gaze: active")
+        ttk.Label(self.root, textvariable=self.gaze_status_var).pack()
         ttk.Button(self.root, text="Calibrate gaze", command=self._start_calibration).pack()
 
         self.capture = WebcamCapture()
         self.recognizer = HandGestureRecognizer()
-        self.dispatcher = ActionDispatcher()
+        action_map = default_action_map()
+        action_map["fist"] = self._pause_gaze_control
+        action_map["open_palm"] = self._resume_gaze_control
+        self.dispatcher = ActionDispatcher(action_map)
         self.gaze_tracker = FaceGazeTracker()
         self.cursor = CursorController()
         self.calibration: GazeCalibration | None = load_calibration()
         self._last_offset: tuple[float, float] | None = None
+        self._gaze_paused = False
         self._running = False
 
     def start(self) -> None:
@@ -73,7 +79,8 @@ class GestureOsApp:
             face = self.gaze_tracker.process(frame_rgb)
             self._last_offset = iris_offset(face) if face is not None else None
             if self._last_offset is not None:
-                self._move_cursor(*self._last_offset)
+                if not self._gaze_paused:
+                    self._move_cursor(*self._last_offset)
                 draw_debug_overlay(frame_rgb, face)
 
             image = ImageTk.PhotoImage(Image.fromarray(frame_rgb))
@@ -89,9 +96,19 @@ class GestureOsApp:
                 self.cursor.move(offset_x, offset_y)  # uncalibrated fallback
         except pyautogui.FailSafeException:
             # User dragged the real mouse to a screen corner: pyautogui's
-            # built-in panic button. Stop moving the cursor until restarted.
-            self.status_var.set("gaze cursor paused (fail-safe triggered)")
-            self.calibration = None
+            # built-in panic button. Actually stop moving the cursor (not
+            # just switch modes — the fallback would immediately retrigger
+            # this at the same corner) until they make an open_palm gesture.
+            self._gaze_paused = True
+            self.gaze_status_var.set("gaze: paused (fail-safe triggered)")
+
+    def _pause_gaze_control(self) -> None:
+        self._gaze_paused = True
+        self.gaze_status_var.set("gaze: paused (fist)")
+
+    def _resume_gaze_control(self) -> None:
+        self._gaze_paused = False
+        self.gaze_status_var.set("gaze: active (open palm)")
 
     def _start_calibration(self) -> None:
         CalibrationWindow(

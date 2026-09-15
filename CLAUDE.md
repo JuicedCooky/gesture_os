@@ -9,8 +9,10 @@ named gesture, and dispatched to an OS-level action (media keys, volume, etc.) v
 second, independent pipeline runs MediaPipe face tracking to move the mouse cursor from iris
 position: an in-app calibration flow fits a per-user `offset -> screen pixel` mapping so gaze maps
 to an absolute screen position ("look here, cursor goes here"), falling back to relative/
-joystick-style movement before calibration exists (see Architecture). The UI is a Python desktop
-app (Tkinter). The cursor-control feature is experimental and being tuned for stability.
+joystick-style movement before calibration exists (see Architecture). `fist`/`open_palm` pause and
+resume gaze cursor movement (tracking/overlay keep running either way) rather than firing an OS
+action, with current state shown in its own status label. The UI is a Python desktop app
+(Tkinter). The cursor-control feature is experimental and being tuned for stability.
 
 This project was scaffolded from an empty repo; the current code is a minimal working skeleton, not
 a feature-complete app.
@@ -125,8 +127,11 @@ WebcamCapture -- frame
   `get_offset` callback, not a direct dependency, so this stays decoupled from `GestureOsApp`).
   Fits and saves the calibration once all 5 points are captured, then calls `on_complete`.
 - **`actions.py`** — the OS-effecting layer for both pipelines:
-  - `ActionDispatcher` maps a gesture name to a `pyautogui` call via a plain
-    `dict[str, Callable[[], None]]` (`default_action_map`). Add new gesture bindings here, not in the UI.
+  - `ActionDispatcher` maps a gesture name to a zero-arg callable via a plain
+    `dict[str, Callable[[], None]]` (`default_action_map`). `default_action_map()` deliberately
+    excludes `fist`/`open_palm` — they're bound in `ui/app.py` instead (see below) because pausing
+    gaze control needs access to app state a stateless map can't hold; add stateless gesture
+    bindings here.
   - `CursorController.move_to(x, y)` — calibrated mode, `pyautogui.moveTo` to an absolute screen
     position from `GazeCalibration.to_screen`. This is what runs once calibration.json exists.
   - `CursorController.move(offset_x, offset_y)` — uncalibrated fallback, `pyautogui.moveRel`:
@@ -136,10 +141,21 @@ WebcamCapture -- frame
   separate thread): each tick reads one frame, runs it through both the hand recognizer (dispatching
   any resulting gesture) and the face gaze tracker (moving the cursor via calibrated or fallback
   mode, tracked in `self.calibration`), and redraws the frame in the video `Label`.
-  `pyautogui.FailSafeException` (the user dragging the real mouse to a screen corner — pyautogui's
-  built-in panic button) is caught in `_move_cursor` and drops back to uncalibrated mode rather than
-  crashing the app.
+  - `self._gaze_paused` gates cursor movement only — tracking and `draw_debug_overlay` keep
+    running, and other gestures still dispatch, while paused. `__init__` overrides
+    `default_action_map()`'s result with `action_map["fist"] = self._pause_gaze_control` /
+    `action_map["open_palm"] = self._resume_gaze_control` before constructing `ActionDispatcher`,
+    since those two closures need `self`.
+  - `self.gaze_status_var` is a *separate* `StringVar` from `self.status_var` specifically so the
+    gaze pause/resume/fail-safe state is never overwritten by the generic "last gesture"/"running"/
+    "calibrated" messages on `status_var`.
+  - `pyautogui.FailSafeException` (the user dragging the real mouse to a screen corner — pyautogui's
+    built-in panic button) is caught in `_move_cursor` and sets `self._gaze_paused = True` — the
+    same state a `fist` gesture sets, resumed the same way (`open_palm`). Earlier this only cleared
+    `self.calibration`, which didn't actually stop movement (the uncalibrated fallback would keep
+    trying to move the cursor and could immediately retrigger the fail-safe at the same corner).
 
 When adding a new gesture: extend `count_extended_fingers`'s output mapping in
-`HandGestureRecognizer.classify`, then bind it in `actions.default_action_map`. Keep new
-classification logic in the pure-function layer so it stays unit-testable without a camera.
+`HandGestureRecognizer.classify`, then bind it in `actions.default_action_map` (stateless) or
+`GestureOsApp.__init__`'s `action_map` overrides (needs app state). Keep new classification logic
+in the pure-function layer so it stays unit-testable without a camera.
