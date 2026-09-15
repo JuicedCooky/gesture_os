@@ -1,0 +1,145 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Project
+
+Gesture-based OS control: a webcam feed is run through MediaPipe hand tracking, classified into a
+named gesture, and dispatched to an OS-level action (media keys, volume, etc.) via `pyautogui`. A
+second, independent pipeline runs MediaPipe face tracking to move the mouse cursor from iris
+position: an in-app calibration flow fits a per-user `offset -> screen pixel` mapping so gaze maps
+to an absolute screen position ("look here, cursor goes here"), falling back to relative/
+joystick-style movement before calibration exists (see Architecture). The UI is a Python desktop
+app (Tkinter). The cursor-control feature is experimental and being tuned for stability.
+
+This project was scaffolded from an empty repo; the current code is a minimal working skeleton, not
+a feature-complete app.
+
+## Commands
+
+Setup (Windows):
+
+```
+python -m venv .venv
+.venv\Scripts\activate
+pip install -e ".[dev]"
+python scripts/download_models.py
+```
+
+The last step fetches `models/hand_landmarker.task` and `models/face_landmarker.task` (not checked
+into git — see `.gitignore`). `HandGestureRecognizer` and `FaceGazeTracker` each raise
+`FileNotFoundError` with this same instruction if their model is missing.
+
+Gaze cursor control also needs a one-time in-app calibration (click "Calibrate gaze" in the
+running app) before it moves the cursor to an absolute position; it saves to `calibration.json`
+(also gitignored) and falls back to relative movement until that file exists.
+
+Run the app:
+
+```
+gesture-os
+```
+
+(equivalently: `python -m gesture_os.main`)
+
+Run tests:
+
+```
+pytest
+```
+
+Run a single test:
+
+```
+pytest tests/test_recognizer.py::test_open_palm_has_five_extended_fingers
+```
+
+Lint:
+
+```
+ruff check .
+```
+
+Format:
+
+```
+ruff format .
+```
+
+## Architecture
+
+Two independent pipelines share one webcam frame per tick, both wired together in
+`src/gesture_os/ui/app.py` (`GestureOsApp._tick`), which is the composition root for the whole app:
+
+```
+                    +-> HandGestureRecognizer -> ActionDispatcher -> pyautogui.press
+                    |        (recognizer.py)        (actions.py)
+WebcamCapture -- frame
+   (capture.py)     |
+                    +-> FaceGazeTracker -> iris_offset -> CursorController -> pyautogui.moveTo/moveRel
+                            (gaze.py)         (gaze.py)   (actions.py, via   (actions.py)
+                                                            GazeCalibration
+                                                            in calibration.py
+                                                            if calibrated)
+```
+
+- **`capture.py`** — thin wrapper around `cv2.VideoCapture`. No MediaPipe/UI dependency.
+- **`recognizer.py`** — two layers, split deliberately:
+  - `count_extended_fingers(hand: Hand) -> int` is pure geometry over landmark coordinates, with no
+    MediaPipe dependency, so gesture-classification logic can be unit tested with synthetic landmark
+    data (see `tests/test_recognizer.py`) instead of requiring a camera or the model at test time.
+  - `HandGestureRecognizer` wraps MediaPipe's **Tasks** `vision.HandLandmarker` (the legacy
+    `mediapipe.solutions.hands` API was removed in mediapipe 1.0) in `VIDEO` running mode, feeding
+    strictly increasing millisecond timestamps to `detect_for_video`. It loads
+    `models/hand_landmarker.task` (see Commands above) and feeds its output through the pure function
+    above. `classify()` maps an extended-finger count to a gesture name (`fist`, `point`, `peace`,
+    `open_palm`, or `unknown`).
+  - Gotcha: import Tasks submodules with `from mediapipe.tasks.python import vision` — writing
+    `import mediapipe.tasks.python.vision as vision` raises a spurious
+    `ImportError: cannot import name 'python' from 'mediapipe.tasks.python'` due to an
+    attribute-resolution quirk in this MediaPipe build.
+- **`gaze.py`** — same two-layer split, for the face/cursor pipeline:
+  - `iris_offset(face: Face) -> (x, y)` is pure geometry: iris-center position relative to each eye
+    socket's own midpoint, in raw (unmirrored) image-coordinate directions, averaged over both eyes.
+    No smoothing/calibration — see `tests/test_gaze.py`. It's a *relative* offset in [-1, 1], not
+    itself a screen position — turning it into one is calibration.py's job.
+  - `FaceGazeTracker` wraps MediaPipe's Tasks `vision.FaceLandmarker` (478-point face mesh with iris
+    landmarks built in) the same way `HandGestureRecognizer` wraps `HandLandmarker` — same `VIDEO`
+    running mode / monotonic timestamp pattern, same `from mediapipe.tasks.python import vision`
+    import gotcha (see recognizer.py's note).
+  - `draw_debug_overlay(frame_rgb, face)` — MediaPipe has no built-in display of its own (it only
+    returns landmarks); this draws the exact eye-socket/iris points `iris_offset` reads directly
+    onto the frame `ui/app.py` shows, so tracking quality is visible in the UI itself. Called from
+    `GestureOsApp._tick` right after moving the cursor, on `frame_rgb` in place (RGB color order —
+    it's the same array that gets displayed).
+- **`calibration.py`** — fits and persists the offset → screen-pixel mapping. Same split again:
+  - `fit_calibration(samples, screen_width, screen_height) -> GazeCalibration` does per-axis linear
+    least squares (`_linear_fit`, plain-Python, no numpy) over `CalibrationSample(offset,
+    screen_point)` pairs. `GazeCalibration.to_screen(offset_x, offset_y)` applies it and clamps to
+    the screen — both pure, see `tests/test_calibration.py`.
+  - `save_calibration`/`load_calibration` persist a `GazeCalibration` as `calibration.json` at the
+    repo root (gitignored). `GestureOsApp` loads it at startup; `None` means uncalibrated.
+- **`ui/calibration_window.py`** — `CalibrationWindow`, a fullscreen Toplevel driven by
+  `GestureOsApp`'s "Calibrate gaze" button. Walks a 5-point target list (center + 4 corners); SPACE
+  captures a `CalibrationSample` using the app's current `iris_offset` reading (passed in as a
+  `get_offset` callback, not a direct dependency, so this stays decoupled from `GestureOsApp`).
+  Fits and saves the calibration once all 5 points are captured, then calls `on_complete`.
+- **`actions.py`** — the OS-effecting layer for both pipelines:
+  - `ActionDispatcher` maps a gesture name to a `pyautogui` call via a plain
+    `dict[str, Callable[[], None]]` (`default_action_map`). Add new gesture bindings here, not in the UI.
+  - `CursorController.move_to(x, y)` — calibrated mode, `pyautogui.moveTo` to an absolute screen
+    position from `GazeCalibration.to_screen`. This is what runs once calibration.json exists.
+  - `CursorController.move(offset_x, offset_y)` — uncalibrated fallback, `pyautogui.moveRel`:
+    `_apply_deadzone` zeroes small jitter near center, then the remainder is scaled by
+    `sensitivity`. Only used before a calibration exists.
+- **`ui/app.py`** — `GestureOsApp` owns the Tk root window and the poll loop (`root.after`, not a
+  separate thread): each tick reads one frame, runs it through both the hand recognizer (dispatching
+  any resulting gesture) and the face gaze tracker (moving the cursor via calibrated or fallback
+  mode, tracked in `self.calibration`), and redraws the frame in the video `Label`.
+  `pyautogui.FailSafeException` (the user dragging the real mouse to a screen corner — pyautogui's
+  built-in panic button) is caught in `_move_cursor` and drops back to uncalibrated mode rather than
+  crashing the app.
+
+When adding a new gesture: extend `count_extended_fingers`'s output mapping in
+`HandGestureRecognizer.classify`, then bind it in `actions.default_action_map`. Keep new
+classification logic in the pure-function layer so it stays unit-testable without a camera.
