@@ -12,21 +12,19 @@ GestureAction = Callable[[], None]
 def default_action_map() -> dict[str, GestureAction]:
     """The built-in gesture -> OS action bindings.
 
-    `fist`/`open_palm` are deliberately absent here: the app binds those to
-    pausing/resuming gaze cursor control instead (see GestureOsApp), which
-    needs access to app state a stateless action map can't hold.
+    Empty for now — `point`/`peace` are unbound (previously volume up/down,
+    removed) and `fist`/`open_palm` are bound in `GestureOsApp` instead, to
+    pause/resume gaze cursor control, which needs access to app state a
+    stateless action map can't hold.
     """
-    return {
-        "point": lambda: pyautogui.press("volumeup"),
-        "peace": lambda: pyautogui.press("volumedown"),
-    }
+    return {}
 
 
 class ActionDispatcher:
     """Runs the action bound to a gesture, ignoring unmapped/unknown ones."""
 
     def __init__(self, action_map: dict[str, GestureAction] | None = None) -> None:
-        self.action_map = action_map or default_action_map()
+        self.action_map = default_action_map() if action_map is None else action_map
 
     def dispatch(self, gesture: str) -> bool:
         """Run the action for `gesture`. Returns whether one was found."""

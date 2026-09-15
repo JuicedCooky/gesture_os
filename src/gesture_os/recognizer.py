@@ -2,11 +2,18 @@
 
 Classification is split into two layers on purpose:
 
-- `count_extended_fingers` is pure geometry over landmark coordinates, with
-  no dependency on MediaPipe itself, so it can be unit tested with synthetic
-  landmark data (see tests/test_recognizer.py).
+- `count_extended_fingers` (and the `_extended_fingers` it's built on) is
+  pure geometry over landmark coordinates, with no dependency on MediaPipe
+  itself, so it can be unit tested with synthetic landmark data (see
+  tests/test_recognizer.py).
 - `HandGestureRecognizer` wraps the actual MediaPipe `HandLandmarker` task
   and feeds its output through the pure classification logic.
+
+`draw_debug_overlay` is a third, separate thing: MediaPipe has no built-in
+display of its own (it only returns landmarks), so this draws the hand
+skeleton and each fingertip's extended/curled state — the exact signal
+`count_extended_fingers` reads — directly onto the frame ui/app.py already
+shows, the same way gaze.py's `draw_debug_overlay` does for iris tracking.
 
 Note: import Tasks submodules with `from mediapipe.tasks.python import vision`
 (not `import mediapipe.tasks.python.vision as vision`) — the latter raises a
@@ -20,11 +27,15 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+import cv2
 import mediapipe as mp
 from mediapipe.tasks.python import BaseOptions, vision
 
 # <repo root>/models/hand_landmarker.task — fetched by scripts/download_models.py.
 DEFAULT_MODEL_PATH = Path(__file__).resolve().parents[2] / "models" / "hand_landmarker.task"
+
+# Fingertip landmark ids, thumb through pinky — the order _extended_fingers returns.
+_FINGERTIPS = (4, 8, 12, 16, 20)
 
 
 @dataclass(frozen=True)
@@ -35,24 +46,50 @@ class Hand:
     handedness: str  # "Left" or "Right", as reported by MediaPipe
 
 
-def count_extended_fingers(hand: Hand) -> int:
-    """Count how many fingers are extended, using landmark geometry alone."""
+def _extended_fingers(hand: Hand) -> list[bool]:
+    """Per-finger extended/curled state, thumb through pinky (see _FINGERTIPS)."""
     lm = hand.landmarks
-    extended = 0
 
     # Thumb: compare x position against its own knuckle, mirrored by handedness.
     thumb_tip, thumb_ip = lm[4], lm[3]
     if hand.handedness == "Right":
-        extended += thumb_tip[0] < thumb_ip[0]
+        thumb_extended = thumb_tip[0] < thumb_ip[0]
     else:
-        extended += thumb_tip[0] > thumb_ip[0]
+        thumb_extended = thumb_tip[0] > thumb_ip[0]
 
     # Other four fingers: tip above its own middle knuckle means "extended".
-    for tip_id in (8, 12, 16, 20):
-        pip_id = tip_id - 2
-        extended += lm[tip_id][1] < lm[pip_id][1]
+    others = [lm[tip_id][1] < lm[tip_id - 2][1] for tip_id in (8, 12, 16, 20)]
+    return [thumb_extended, *others]
 
-    return extended
+
+def count_extended_fingers(hand: Hand) -> int:
+    """Count how many fingers are extended, using landmark geometry alone."""
+    return sum(_extended_fingers(hand))
+
+
+def draw_debug_overlay(frame_rgb, hand: Hand) -> None:
+    """Draws the hand skeleton onto `frame_rgb` in place (RGB channel order,
+    matching the frame ui/app.py displays): gray lines/dots for the whole
+    hand, a green dot on each fingertip currently read as extended, red on
+    each read as curled — exactly what `count_extended_fingers` is reading,
+    so a misclassified gesture is visible rather than only inferred from the
+    dispatched action.
+    """
+    height, width = frame_rgb.shape[:2]
+
+    def pixel(idx: int) -> tuple[int, int]:
+        x, y, _ = hand.landmarks[idx]
+        return int(x * width), int(y * height)
+
+    for connection in vision.HandLandmarksConnections.HAND_CONNECTIONS:
+        cv2.line(frame_rgb, pixel(connection.start), pixel(connection.end), (160, 160, 160), 1)
+    for idx in range(len(hand.landmarks)):
+        if idx not in _FINGERTIPS:
+            cv2.circle(frame_rgb, pixel(idx), 2, (160, 160, 160), thickness=-1)
+
+    for tip_id, extended in zip(_FINGERTIPS, _extended_fingers(hand)):
+        color = (0, 255, 0) if extended else (255, 0, 0)
+        cv2.circle(frame_rgb, pixel(tip_id), 5, color, thickness=-1)
 
 
 class HandGestureRecognizer:

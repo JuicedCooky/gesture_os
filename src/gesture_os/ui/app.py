@@ -18,8 +18,10 @@ from PIL import Image, ImageTk
 from gesture_os.actions import ActionDispatcher, CursorController, default_action_map
 from gesture_os.calibration import GazeCalibration, load_calibration
 from gesture_os.capture import WebcamCapture
-from gesture_os.gaze import FaceGazeTracker, draw_debug_overlay, iris_offset
+from gesture_os.gaze import FaceGazeTracker, iris_offset
+from gesture_os.gaze import draw_debug_overlay as draw_gaze_overlay
 from gesture_os.recognizer import HandGestureRecognizer
+from gesture_os.recognizer import draw_debug_overlay as draw_hand_overlay
 from gesture_os.ui.calibration_window import CalibrationWindow
 
 _POLL_MS = 15  # UI tick interval; actual throughput is capped by camera FPS
@@ -75,13 +77,14 @@ class GestureOsApp:
                 gesture = self.recognizer.classify(hand)
                 if self.dispatcher.dispatch(gesture):
                     self.status_var.set(f"running - last gesture: {gesture}")
+                draw_hand_overlay(frame_rgb, hand)
 
             face = self.gaze_tracker.process(frame_rgb)
             self._last_offset = iris_offset(face) if face is not None else None
             if self._last_offset is not None:
                 if not self._gaze_paused:
                     self._move_cursor(*self._last_offset)
-                draw_debug_overlay(frame_rgb, face)
+                draw_gaze_overlay(frame_rgb, face)
 
             image = ImageTk.PhotoImage(Image.fromarray(frame_rgb))
             self.video_label.configure(image=image)
