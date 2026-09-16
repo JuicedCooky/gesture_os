@@ -12,9 +12,11 @@ window control it: **tracking source** (iris position vs. nose/head-pose positio
 vs `nose_offset` in gaze.py, interchangeable, same shape/sign convention) and **movement mode**
 (absolute, via an in-app calibration that fits a per-user `offset -> screen pixel` mapping so gaze
 maps to an absolute screen position — "look here, cursor goes here" — vs. relative/joystick-style
-nudging, selectable any time regardless of calibration). `fist`/`open_palm` pause and resume gaze
-cursor movement (tracking/overlay keep running either way) rather than firing an OS action, with
-current state shown in its own status label. The UI is a Python desktop app (Tkinter). The
+nudging, selectable any time regardless of calibration). A large "Mouse Control: ON/OFF" button and
+`fist`/`open_palm` both pause/resume gaze cursor movement — same single state either way, not two
+switches (tracking/overlay keep running either way) — with current state shown in its own status
+label and the button's own text/color. "Save settings" persists both toggles plus per-source
+sensitivity to `settings.json`, restored at startup. The UI is a Python desktop app (Tkinter). The
 cursor-control feature is experimental and being tuned for stability.
 
 This project was scaffolded from an empty repo; the current code is a minimal working skeleton, not
@@ -153,14 +155,20 @@ WebcamCapture -- frame
     frame `ui/app.py` shows — both, regardless of which tracking source is currently selected — so
     tracking quality is visible in the UI itself. Called from `GestureOsApp._tick` right after
     moving the cursor, on `frame_rgb` in place (RGB color order — it's the same array displayed).
-- **`settings.py`** — persists per-source relative-movement sensitivity (`AxisSensitivity(x, y)`
-  for both `iris` and `nose`, in one `Settings`) to `settings.json` at the repo root (gitignored).
-  `load_settings()` returns `Settings.defaults()` if none is saved yet. Sign matters: a negative
-  axis value inverts that axis' direction. The defaults negate x for the same raw-frame-mirroring
-  reason as recognizer.py's handedness gotcha — "look/turn right" maps to *smaller* image x in an
-  unmirrored frame — but are starting points, not verified against a real camera; that's exactly
-  why they're user-editable rather than hardcoded. Calibrated absolute mode doesn't need this: its
-  fitted mapping (`GazeCalibration`) self-corrects for both scale and sign from real samples.
+- **`settings.py`** — persists the user's cursor-control preferences to `settings.json` at the repo
+  root (gitignored): per-source relative-movement sensitivity (`AxisSensitivity(x, y)` for both
+  `iris` and `nose`), plus `tracking_source`/`movement_mode` (the two `ui/app.py` radio-button
+  states) so a session resumes exactly where it left off. `load_settings()` returns
+  `Settings.defaults()` if none is saved yet, and fills in `tracking_source`/`movement_mode` with
+  defaults via `.get()` if loading an older settings.json saved before those fields existed —
+  don't replace that with direct key access, it'll raise `KeyError` on such a file (there's a real
+  one from before this feature that this was written against). Sign matters on sensitivity: a
+  negative axis value inverts that axis' direction. The sensitivity defaults negate x for the same
+  raw-frame-mirroring reason as recognizer.py's handedness gotcha — "look/turn right" maps to
+  *smaller* image x in an unmirrored frame — but are starting points, not verified against a real
+  camera; that's exactly why they're user-editable rather than hardcoded. Calibrated absolute mode
+  doesn't need the sensitivity values: its fitted mapping (`GazeCalibration`) self-corrects for
+  both scale and sign from real samples.
 - **`calibration.py`** — fits and persists the offset → screen-pixel mapping. Same split again:
   - `fit_calibration(samples, screen_width, screen_height) -> GazeCalibration` does per-axis linear
     least squares (`_linear_fit`, plain-Python, no numpy) over `CalibrationSample(offset,
@@ -207,23 +215,41 @@ WebcamCapture -- frame
     combination, calibration permitting). In relative mode, `_move_cursor` also re-reads
     `self.tracking_source_var` to pick `self.settings.iris` vs `.nose` for `CursorController.move`.
   - `self.settings` (a `settings.Settings`, loaded at startup) backs four `tk.DoubleVar`s (Iris/Nose
-    × X/Y) in the "Relative movement sensitivity" panel. They're edited freely and only take effect
-    on "Save sensitivity" (`_save_sensitivity`), which rebuilds `self.settings` from the vars and
-    calls `settings.save_settings` — a `tk.TclError` from a non-numeric entry is caught and reported
-    in `sensitivity_status_var` rather than crashing or silently keeping stale values.
-  - `self._gaze_paused` gates cursor movement only — tracking and both debug overlays keep
-    running, and other gestures still dispatch, while paused. `__init__` overrides
-    `default_action_map()`'s result with `action_map["fist"] = self._pause_gaze_control` /
-    `action_map["open_palm"] = self._resume_gaze_control` before constructing `ActionDispatcher`,
-    since those two closures need `self`.
+    × X/Y) in the "Relative movement sensitivity" panel, and seeds `tracking_source_var`/
+    `movement_mode_var`'s *initial* value (their live value is whatever the radio buttons currently
+    show, read fresh every tick — see above). All of it is edited freely at runtime and only
+    persisted on "Save settings" (`_save_settings`), which rebuilds `self.settings` from the current
+    var values (sensitivity fields *and* both radio-button choices) and calls `settings.save_settings`
+    — a `tk.TclError` from a non-numeric sensitivity entry is caught and reported in
+    `settings_status_var` rather than crashing or silently keeping stale values.
+  - `self.iris_sensitivity_frame`/`self.nose_sensitivity_frame` hold the Iris X/Y and Nose X/Y
+    entry rows respectively, both children of the same `sensitivity_frame`, but only one is ever
+    `pack()`ed at a time (the other `pack_forget()`) — `_update_sensitivity_visibility` picks based
+    on `tracking_source_var`, wired via `tracking_source_var.trace_add("write", ...)` so it reacts
+    to the radio button itself, not just the once-a-tick `_tick` read. Called once manually right
+    after creating both frames, to set the correct initial visibility before any trace fires.
+  - `self._gaze_paused` — the one on/off state for cursor movement, set at the very top of
+    `__init__` (before any widget reads it). Tracking and both debug overlays keep running, and
+    other gestures still dispatch, while paused. Three independent triggers all funnel through the
+    same two methods, `_pause_gaze_control(reason=...)`/`_resume_gaze_control(reason=...)`, so there
+    is exactly one source of truth rather than parallel state to keep in sync:
+    - `fist`/`open_palm` gestures — `__init__` overrides `default_action_map()`'s result with
+      `action_map["fist"] = self._pause_gaze_control` / `action_map["open_palm"] =
+      self._resume_gaze_control` before constructing `ActionDispatcher` (default `reason` text),
+      since those two closures need `self`.
+    - The large `self.mouse_control_button` (a plain `tk.Button`, not `ttk.Button`, since `ttk`
+      doesn't support `font`/`bg` directly and this one is meant to be visually prominent) —
+      `_toggle_mouse_control` calls whichever of the pair applies with `reason="button"`.
+    - `pyautogui.FailSafeException` (dragging the real mouse to a screen corner — pyautogui's
+      built-in panic button), caught in `_move_cursor`, calls `_pause_gaze_control(reason="fail-safe
+      triggered")`. Earlier this only cleared `self.calibration`, which didn't actually stop
+      movement (the uncalibrated fallback would keep trying to move the cursor and could
+      immediately retrigger the fail-safe at the same corner).
+    Both methods end by calling `_update_mouse_control_button()`, so the button's label/color and
+    `self.gaze_status_var`'s text stay in sync no matter which of the three triggered the change.
   - `self.gaze_status_var` is a *separate* `StringVar` from `self.status_var` specifically so the
     gaze pause/resume/fail-safe state is never overwritten by the generic "last gesture"/"running"/
     "calibrated" messages on `status_var`.
-  - `pyautogui.FailSafeException` (the user dragging the real mouse to a screen corner — pyautogui's
-    built-in panic button) is caught in `_move_cursor` and sets `self._gaze_paused = True` — the
-    same state a `fist` gesture sets, resumed the same way (`open_palm`). Earlier this only cleared
-    `self.calibration`, which didn't actually stop movement (the uncalibrated fallback would keep
-    trying to move the cursor and could immediately retrigger the fail-safe at the same corner).
 
 When adding a new gesture: extend `count_extended_fingers`'s output mapping in
 `HandGestureRecognizer.classify`, then bind it in `actions.default_action_map` (stateless) or

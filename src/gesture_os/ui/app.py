@@ -35,6 +35,20 @@ class GestureOsApp:
         self.root = tk.Tk()
         self.root.title("gesture_os")
 
+        # Set before any widget that reads it, so the big button below can
+        # show the right label/color from its very first paint.
+        self._gaze_paused = False
+
+        self.mouse_control_button = tk.Button(
+            self.root,
+            font=("Segoe UI", 14, "bold"),
+            height=2,
+            fg="white",
+            command=self._toggle_mouse_control,
+        )
+        self.mouse_control_button.pack(fill="x", padx=4, pady=6)
+        self._update_mouse_control_button()
+
         self.video_label = ttk.Label(self.root)
         self.video_label.pack()
 
@@ -44,7 +58,9 @@ class GestureOsApp:
         ttk.Label(self.root, textvariable=self.gaze_status_var).pack()
         ttk.Button(self.root, text="Calibrate gaze", command=self._start_calibration).pack()
 
-        self.tracking_source_var = tk.StringVar(value="iris")
+        self.settings = load_settings()
+
+        self.tracking_source_var = tk.StringVar(value=self.settings.tracking_source)
         source_frame = ttk.LabelFrame(self.root, text="Tracking source")
         source_frame.pack(fill="x", padx=4, pady=2)
         ttk.Radiobutton(
@@ -58,7 +74,7 @@ class GestureOsApp:
         ).pack(side="left")
         self.nose_tracker = NoseOffsetTracker()
 
-        self.movement_mode_var = tk.StringVar(value="absolute")
+        self.movement_mode_var = tk.StringVar(value=self.settings.movement_mode)
         movement_frame = ttk.LabelFrame(self.root, text="Movement mode")
         movement_frame.pack(fill="x", padx=4, pady=2)
         ttk.Radiobutton(
@@ -70,22 +86,31 @@ class GestureOsApp:
             value="relative",
         ).pack(side="left")
 
-        self.settings = load_settings()
         self.iris_x_var = tk.DoubleVar(value=self.settings.iris.x)
         self.iris_y_var = tk.DoubleVar(value=self.settings.iris.y)
         self.nose_x_var = tk.DoubleVar(value=self.settings.nose.x)
         self.nose_y_var = tk.DoubleVar(value=self.settings.nose.y)
         sensitivity_frame = ttk.LabelFrame(self.root, text="Relative movement sensitivity")
         sensitivity_frame.pack(fill="x", padx=4, pady=2)
-        self._add_sensitivity_row(sensitivity_frame, "Iris X", self.iris_x_var)
-        self._add_sensitivity_row(sensitivity_frame, "Iris Y", self.iris_y_var)
-        self._add_sensitivity_row(sensitivity_frame, "Nose X", self.nose_x_var)
-        self._add_sensitivity_row(sensitivity_frame, "Nose Y", self.nose_y_var)
-        self.sensitivity_status_var = tk.StringVar(value="")
-        ttk.Button(
-            sensitivity_frame, text="Save sensitivity", command=self._save_sensitivity
-        ).pack(side="left")
-        ttk.Label(sensitivity_frame, textvariable=self.sensitivity_status_var).pack(side="left")
+        # Only one of these two is ever packed at a time — see
+        # _update_sensitivity_visibility — so only the active tracking
+        # source's sensitivity fields are shown.
+        self.iris_sensitivity_frame = ttk.Frame(sensitivity_frame)
+        self._add_sensitivity_row(self.iris_sensitivity_frame, "Iris X", self.iris_x_var)
+        self._add_sensitivity_row(self.iris_sensitivity_frame, "Iris Y", self.iris_y_var)
+        self.nose_sensitivity_frame = ttk.Frame(sensitivity_frame)
+        self._add_sensitivity_row(self.nose_sensitivity_frame, "Nose X", self.nose_x_var)
+        self._add_sensitivity_row(self.nose_sensitivity_frame, "Nose Y", self.nose_y_var)
+        self.tracking_source_var.trace_add("write", self._update_sensitivity_visibility)
+        self._update_sensitivity_visibility()
+
+        save_frame = ttk.Frame(self.root)
+        save_frame.pack(fill="x", padx=4, pady=2)
+        self.settings_status_var = tk.StringVar(value="")
+        ttk.Button(save_frame, text="Save settings", command=self._save_settings).pack(
+            side="left"
+        )
+        ttk.Label(save_frame, textvariable=self.settings_status_var).pack(side="left")
 
         self.capture = WebcamCapture()
         self.recognizer = HandGestureRecognizer()
@@ -97,7 +122,6 @@ class GestureOsApp:
         self.cursor = CursorController()
         self.calibration: GazeCalibration | None = load_calibration()
         self._last_offset: tuple[float, float] | None = None
-        self._gaze_paused = False
         self._running = False
 
     def start(self) -> None:
@@ -159,9 +183,8 @@ class GestureOsApp:
             # User dragged the real mouse to a screen corner: pyautogui's
             # built-in panic button. Actually stop moving the cursor (not
             # just switch modes — the fallback would immediately retrigger
-            # this at the same corner) until they make an open_palm gesture.
-            self._gaze_paused = True
-            self.gaze_status_var.set("gaze: paused (fail-safe triggered)")
+            # this at the same corner) until they turn it back on.
+            self._pause_gaze_control(reason="fail-safe triggered")
 
     def _add_sensitivity_row(self, parent: tk.Misc, label: str, var: tk.DoubleVar) -> None:
         row = ttk.Frame(parent)
@@ -169,29 +192,60 @@ class GestureOsApp:
         ttk.Label(row, text=label, width=8).pack(side="left")
         ttk.Entry(row, textvariable=var, width=8).pack(side="left")
 
-    def _save_sensitivity(self) -> None:
+    def _update_sensitivity_visibility(self, *_tk_trace_args: object) -> None:
+        """Shows only the sensitivity fields for the currently selected
+        tracking source. `*_tk_trace_args` absorbs the (name, index, mode)
+        arguments tkinter's variable trace passes, which this doesn't need."""
+        if self.tracking_source_var.get() == "nose":
+            self.iris_sensitivity_frame.pack_forget()
+            self.nose_sensitivity_frame.pack(fill="x")
+        else:
+            self.nose_sensitivity_frame.pack_forget()
+            self.iris_sensitivity_frame.pack(fill="x")
+
+    def _save_settings(self) -> None:
+        """Saves everything the user can currently adjust: per-source
+        sensitivity, tracking source, and movement mode — so a session picks
+        up exactly where it left off next run."""
         try:
             self.settings = Settings(
                 iris=AxisSensitivity(x=self.iris_x_var.get(), y=self.iris_y_var.get()),
                 nose=AxisSensitivity(x=self.nose_x_var.get(), y=self.nose_y_var.get()),
+                tracking_source=self.tracking_source_var.get(),
+                movement_mode=self.movement_mode_var.get(),
             )
         except tk.TclError:
-            self.sensitivity_status_var.set("invalid value(s) — not saved")
+            self.settings_status_var.set("invalid value(s) — not saved")
             return
         save_settings(self.settings)
-        self.sensitivity_status_var.set("saved")
+        self.settings_status_var.set("saved")
 
     def _recenter_nose_tracking(self) -> None:
         self.nose_tracker.recenter()
         self.status_var.set("head position recentered")
 
-    def _pause_gaze_control(self) -> None:
-        self._gaze_paused = True
-        self.gaze_status_var.set("gaze: paused (fist)")
+    def _toggle_mouse_control(self) -> None:
+        if self._gaze_paused:
+            self._resume_gaze_control(reason="button")
+        else:
+            self._pause_gaze_control(reason="button")
 
-    def _resume_gaze_control(self) -> None:
+    def _update_mouse_control_button(self) -> None:
+        if self._gaze_paused:
+            text, color = "Mouse Control: OFF  (click to turn on)", "#a83232"
+        else:
+            text, color = "Mouse Control: ON  (click to turn off)", "#2e7d32"
+        self.mouse_control_button.configure(text=text, bg=color)
+
+    def _pause_gaze_control(self, reason: str = "fist") -> None:
+        self._gaze_paused = True
+        self.gaze_status_var.set(f"gaze: paused ({reason})")
+        self._update_mouse_control_button()
+
+    def _resume_gaze_control(self, reason: str = "open palm") -> None:
         self._gaze_paused = False
-        self.gaze_status_var.set("gaze: active (open palm)")
+        self.gaze_status_var.set(f"gaze: active ({reason})")
+        self._update_mouse_control_button()
 
     def _start_calibration(self) -> None:
         CalibrationWindow(

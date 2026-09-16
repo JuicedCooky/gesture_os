@@ -1,10 +1,12 @@
-"""Persists per-tracking-source relative-movement sensitivity settings.
+"""Persists the user's cursor-control preferences: per-source relative-
+movement sensitivity, plus the last-used tracking source and movement mode.
 
 Two independent (x, y) sensitivity pairs — one for iris tracking, one for
 face/nose tracking — since the two offset signals (see gaze.py) have very
 different natural ranges and users may want to tune, or invert, each
 independently. Saved locally to `settings.json` (gitignored) so tuning
-survives between runs.
+survives between runs; `GestureOsApp` restores `tracking_source`/
+`movement_mode` at startup too, so a session picks up where you left off.
 
 Sign matters, not just magnitude: a negative value on an axis inverts that
 axis' relative-movement direction. Both offset signals come from a raw
@@ -38,12 +40,16 @@ class AxisSensitivity:
 class Settings:
     iris: AxisSensitivity
     nose: AxisSensitivity
+    tracking_source: str = "iris"  # "iris" or "nose"
+    movement_mode: str = "absolute"  # "absolute" or "relative"
 
     @staticmethod
     def defaults() -> Settings:
         return Settings(
             iris=AxisSensitivity(x=-40.0, y=40.0),
             nose=AxisSensitivity(x=-400.0, y=400.0),
+            tracking_source="iris",
+            movement_mode="absolute",
         )
 
 
@@ -52,8 +58,25 @@ def load_settings(path: Path = DEFAULT_SETTINGS_PATH) -> Settings:
     if not path.exists():
         return Settings.defaults()
     data = json.loads(path.read_text())
-    return Settings(iris=AxisSensitivity(**data["iris"]), nose=AxisSensitivity(**data["nose"]))
+    defaults = Settings.defaults()
+    return Settings(
+        iris=AxisSensitivity(**data["iris"]),
+        nose=AxisSensitivity(**data["nose"]),
+        # .get with a fallback: a settings.json saved before these fields
+        # existed shouldn't fail to load, just fall back to the default mode.
+        tracking_source=data.get("tracking_source", defaults.tracking_source),
+        movement_mode=data.get("movement_mode", defaults.movement_mode),
+    )
 
 
 def save_settings(settings: Settings, path: Path = DEFAULT_SETTINGS_PATH) -> None:
-    path.write_text(json.dumps({"iris": asdict(settings.iris), "nose": asdict(settings.nose)}))
+    path.write_text(
+        json.dumps(
+            {
+                "iris": asdict(settings.iris),
+                "nose": asdict(settings.nose),
+                "tracking_source": settings.tracking_source,
+                "movement_mode": settings.movement_mode,
+            }
+        )
+    )

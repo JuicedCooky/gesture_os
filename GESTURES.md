@@ -22,6 +22,11 @@ overlay keep running the whole time, and fist/peace/point still fire while pause
 shows in its own "gaze: active/paused" label in the app window (see Cursor movement below), kept
 separate from the general status line so it's never overwritten by other status messages.
 
+The large **Mouse Control: ON/OFF** button at the top of the app window does the exact same
+pause/resume as `fist`/`open_palm` — it's a second way to reach the same on/off state (for when
+gesturing isn't convenient), not a separate switch. Whichever one you use last — gesture or
+button — is reflected in both: the button's label/color and the "gaze:" status line always agree.
+
 ## Adding or changing a binding
 
 1. Extend the finger-count → gesture name mapping in `HandGestureRecognizer.classify`
@@ -95,17 +100,24 @@ an absolute screen position ("look here, cursor goes here") via `CursorControlle
 In relative mode (selected explicitly, or as the automatic fallback before/without a calibration),
 `CursorController.move()` nudges the cursor via `pyautogui.moveRel`, scaled by a per-axis, per-source
 **sensitivity** (pixels moved per unit of offset past a shared `deadzone`, default `0.15`) — the
-"Relative movement sensitivity" panel in the app window has four fields: Iris X, Iris Y, Nose X,
-Nose Y. **Sign matters, not just magnitude: a negative value inverts that axis' direction** — the
+"Relative movement sensitivity" panel in the app window shows only the two fields (X, Y) for
+whichever tracking source is currently selected — Iris X/Y while "Iris" is chosen, Nose X/Y while
+"Face / nose" is — switching the toggle swaps which pair is visible immediately, since only one of
+them is ever relevant to what's currently moving the cursor. **Sign matters, not just magnitude: a
+negative value inverts that axis' direction** — the
 defaults (`iris: x=-40, y=40`; `nose: x=-400, y=400`) already negate X, since both offset signals
 come from a raw, unmirrored camera frame where "look/turn right" maps to *smaller* image x, not
 larger (the same root cause as the handedness gotcha in recognizer.py). If movement still feels
 backwards or too slow/fast after that, flip the sign or raise the magnitude of whichever axis is
-wrong and click "Save sensitivity" — it's the only place this is calibration-free tuning that
-takes effect immediately, no camera gestures needed. Values persist to `settings.json` (not
-checked into git; see [src/gesture_os/settings.py](src/gesture_os/settings.py)) and reload
-automatically next run. Absolute (calibrated) mode doesn't need this: its fitted mapping
+wrong and click "Save settings". Absolute (calibrated) mode doesn't need this: its fitted mapping
 self-corrects for both speed and direction from your actual calibration samples.
+
+**"Save settings"** persists everything currently selected — both sensitivity fields *and* the
+Tracking source / Movement mode radio buttons — to `settings.json` (not checked into git; see
+[src/gesture_os/settings.py](src/gesture_os/settings.py)), and all of it reloads automatically
+next run, so a session picks up exactly where you left off. Flipping a radio button or editing a
+sensitivity field takes effect immediately in the running app either way; clicking "Save settings"
+only controls whether that choice is still there the *next* time you launch it.
 
 Moving the real mouse to a screen corner is pyautogui's built-in panic button — it stops gaze
 cursor movement outright (the app catches `FailSafeException` and pauses, same as a fist gesture)
