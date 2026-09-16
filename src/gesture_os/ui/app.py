@@ -18,10 +18,11 @@ from PIL import Image, ImageTk
 from gesture_os.actions import ActionDispatcher, CursorController, default_action_map
 from gesture_os.calibration import GazeCalibration, load_calibration
 from gesture_os.capture import WebcamCapture
-from gesture_os.gaze import FaceGazeTracker, iris_offset
+from gesture_os.gaze import FaceGazeTracker, NoseOffsetTracker, iris_offset
 from gesture_os.gaze import draw_debug_overlay as draw_gaze_overlay
 from gesture_os.recognizer import HandGestureRecognizer
 from gesture_os.recognizer import draw_debug_overlay as draw_hand_overlay
+from gesture_os.settings import AxisSensitivity, Settings, load_settings, save_settings
 from gesture_os.ui.calibration_window import CalibrationWindow
 
 _POLL_MS = 15  # UI tick interval; actual throughput is capped by camera FPS
@@ -42,6 +43,49 @@ class GestureOsApp:
         self.gaze_status_var = tk.StringVar(value="gaze: active")
         ttk.Label(self.root, textvariable=self.gaze_status_var).pack()
         ttk.Button(self.root, text="Calibrate gaze", command=self._start_calibration).pack()
+
+        self.tracking_source_var = tk.StringVar(value="iris")
+        source_frame = ttk.LabelFrame(self.root, text="Tracking source")
+        source_frame.pack(fill="x", padx=4, pady=2)
+        ttk.Radiobutton(
+            source_frame, text="Iris", variable=self.tracking_source_var, value="iris"
+        ).pack(side="left")
+        ttk.Radiobutton(
+            source_frame, text="Face / nose", variable=self.tracking_source_var, value="nose"
+        ).pack(side="left")
+        ttk.Button(
+            source_frame, text="Recenter head position", command=self._recenter_nose_tracking
+        ).pack(side="left")
+        self.nose_tracker = NoseOffsetTracker()
+
+        self.movement_mode_var = tk.StringVar(value="absolute")
+        movement_frame = ttk.LabelFrame(self.root, text="Movement mode")
+        movement_frame.pack(fill="x", padx=4, pady=2)
+        ttk.Radiobutton(
+            movement_frame, text="Absolute (calibrated)", variable=self.movement_mode_var,
+            value="absolute",
+        ).pack(side="left")
+        ttk.Radiobutton(
+            movement_frame, text="Relative (dx/dy)", variable=self.movement_mode_var,
+            value="relative",
+        ).pack(side="left")
+
+        self.settings = load_settings()
+        self.iris_x_var = tk.DoubleVar(value=self.settings.iris.x)
+        self.iris_y_var = tk.DoubleVar(value=self.settings.iris.y)
+        self.nose_x_var = tk.DoubleVar(value=self.settings.nose.x)
+        self.nose_y_var = tk.DoubleVar(value=self.settings.nose.y)
+        sensitivity_frame = ttk.LabelFrame(self.root, text="Relative movement sensitivity")
+        sensitivity_frame.pack(fill="x", padx=4, pady=2)
+        self._add_sensitivity_row(sensitivity_frame, "Iris X", self.iris_x_var)
+        self._add_sensitivity_row(sensitivity_frame, "Iris Y", self.iris_y_var)
+        self._add_sensitivity_row(sensitivity_frame, "Nose X", self.nose_x_var)
+        self._add_sensitivity_row(sensitivity_frame, "Nose Y", self.nose_y_var)
+        self.sensitivity_status_var = tk.StringVar(value="")
+        ttk.Button(
+            sensitivity_frame, text="Save sensitivity", command=self._save_sensitivity
+        ).pack(side="left")
+        ttk.Label(sensitivity_frame, textvariable=self.sensitivity_status_var).pack(side="left")
 
         self.capture = WebcamCapture()
         self.recognizer = HandGestureRecognizer()
@@ -80,7 +124,13 @@ class GestureOsApp:
                 draw_hand_overlay(frame_rgb, hand)
 
             face = self.gaze_tracker.process(frame_rgb)
-            self._last_offset = iris_offset(face) if face is not None else None
+            if face is not None:
+                if self.tracking_source_var.get() == "nose":
+                    self._last_offset = self.nose_tracker.read(face)
+                else:
+                    self._last_offset = iris_offset(face)
+            else:
+                self._last_offset = None
             if self._last_offset is not None:
                 if not self._gaze_paused:
                     self._move_cursor(*self._last_offset)
@@ -93,10 +143,18 @@ class GestureOsApp:
 
     def _move_cursor(self, offset_x: float, offset_y: float) -> None:
         try:
-            if self.calibration is not None:
+            wants_absolute = self.movement_mode_var.get() == "absolute"
+            if wants_absolute and self.calibration is not None:
                 self.cursor.move_to(*self.calibration.to_screen(offset_x, offset_y))
             else:
-                self.cursor.move(offset_x, offset_y)  # uncalibrated fallback
+                # Relative mode, chosen explicitly or as the fallback before
+                # a calibration exists for the current tracking source.
+                axis = (
+                    self.settings.nose
+                    if self.tracking_source_var.get() == "nose"
+                    else self.settings.iris
+                )
+                self.cursor.move(offset_x, offset_y, axis.x, axis.y)
         except pyautogui.FailSafeException:
             # User dragged the real mouse to a screen corner: pyautogui's
             # built-in panic button. Actually stop moving the cursor (not
@@ -104,6 +162,28 @@ class GestureOsApp:
             # this at the same corner) until they make an open_palm gesture.
             self._gaze_paused = True
             self.gaze_status_var.set("gaze: paused (fail-safe triggered)")
+
+    def _add_sensitivity_row(self, parent: tk.Misc, label: str, var: tk.DoubleVar) -> None:
+        row = ttk.Frame(parent)
+        row.pack(fill="x")
+        ttk.Label(row, text=label, width=8).pack(side="left")
+        ttk.Entry(row, textvariable=var, width=8).pack(side="left")
+
+    def _save_sensitivity(self) -> None:
+        try:
+            self.settings = Settings(
+                iris=AxisSensitivity(x=self.iris_x_var.get(), y=self.iris_y_var.get()),
+                nose=AxisSensitivity(x=self.nose_x_var.get(), y=self.nose_y_var.get()),
+            )
+        except tk.TclError:
+            self.sensitivity_status_var.set("invalid value(s) — not saved")
+            return
+        save_settings(self.settings)
+        self.sensitivity_status_var.set("saved")
+
+    def _recenter_nose_tracking(self) -> None:
+        self.nose_tracker.recenter()
+        self.status_var.set("head position recentered")
 
     def _pause_gaze_control(self) -> None:
         self._gaze_paused = True

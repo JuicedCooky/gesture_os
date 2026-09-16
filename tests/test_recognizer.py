@@ -23,9 +23,27 @@ def test_open_palm_has_five_extended_fingers():
     finger_y = {tip_id: 0.1 for tip_id in (8, 12, 16, 20)}
     hand = _hand(finger_y, handedness="Right")
     landmarks = list(hand.landmarks)
-    landmarks[4] = (0.3, 0.5, 0.0)  # thumb tip left of its IP joint (x=0.5)
+    landmarks[4] = (0.7, 0.5, 0.0)  # thumb tip right of its IP joint (x=0.5) -> extended
     hand = Hand(landmarks=landmarks, handedness="Right")
     assert count_extended_fingers(hand) == 5
+
+
+def test_thumb_alone_extended_for_right_hand():
+    # Regression test for a reported bug: thumb was read as curled when
+    # actually extended, and vice versa (see recognizer.py's handedness note).
+    hand = _hand({}, handedness="Right")
+    landmarks = list(hand.landmarks)
+    landmarks[4] = (0.7, 0.5, 0.0)  # thumb tip right of its IP joint (x=0.5)
+    hand = Hand(landmarks=landmarks, handedness="Right")
+    assert count_extended_fingers(hand) == 1
+
+
+def test_thumb_alone_extended_for_left_hand():
+    hand = _hand({}, handedness="Left")
+    landmarks = list(hand.landmarks)
+    landmarks[4] = (0.3, 0.5, 0.0)  # thumb tip left of its IP joint (x=0.5)
+    hand = Hand(landmarks=landmarks, handedness="Left")
+    assert count_extended_fingers(hand) == 1
 
 
 def test_draw_debug_overlay_colors_extended_and_curled_tips_differently():
@@ -33,7 +51,7 @@ def test_draw_debug_overlay_colors_extended_and_curled_tips_differently():
     frame = np.zeros((100, 100, 3), dtype=np.uint8)
     fist = _hand({})
     landmarks = list(fist.landmarks)
-    landmarks[4] = (0.6, 0.5, 0.0)  # thumb tip right of IP -> curled for a Right hand
+    landmarks[4] = (0.3, 0.5, 0.0)  # thumb tip left of IP -> curled for a Right hand
     fist = Hand(landmarks=landmarks, handedness="Right")
 
     draw_debug_overlay(frame, fist)

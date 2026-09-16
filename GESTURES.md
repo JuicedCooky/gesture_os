@@ -48,23 +48,64 @@ of the same name for iris tracking — see below.)
 ## Cursor movement (gaze, experimental)
 
 Separately from hand gestures, [src/gesture_os/gaze.py](src/gesture_os/gaze.py) moves the mouse
-cursor from iris position: `FaceGazeTracker` finds the iris in each eye socket, and `iris_offset`
-computes how far off-center it is, in [-1, 1] per axis.
+cursor from face tracking. The app window has two independent toggles for this:
+
+**Tracking source** — which signal drives the cursor:
+
+- **Iris** (default) — `iris_offset`: iris position within each eye socket, averaged over both
+  eyes. Follows just your eyes, but is the noisier of the two signals.
+- **Face / nose** — nose-tip position relative to the midpoint between your eyes, normalized by
+  inter-eye distance (so it stays roughly constant as you move closer to/farther from the camera)
+  — a head-pose proxy. Steadier than iris tracking, at the cost of needing to move your head, not
+  just glance, to move the cursor. Unlike iris tracking, the raw nose position has no natural
+  "centered" reading (the nose sits below eye level on every face, not centered on it), so this
+  goes through `NoseOffsetTracker`, which reports movement *relative to a captured baseline*
+  rather than the raw reading — see "Recenter head position" below.
+
+Both signals return the same shape of value (roughly [-1, 1] per axis, same sign convention), so
+either can drive `CursorController`/`GazeCalibration` unchanged — switching the toggle mid-session
+just changes which one feeds them from the next frame on.
+
+**Recenter head position** — click this any time nose tracking feels off-center (after shifting in
+your seat, leaning back, etc.): it discards `NoseOffsetTracker`'s current baseline, and the very
+next frame's nose position becomes the new "centered" reading. The first time nose tracking is
+ever used, a baseline is captured automatically the same way — you don't need to click it before
+first use, only when your "neutral" position has changed. **This is also the fix for nose
+relative movement always dragging the cursor one direction** (nearly always down, since the nose
+sits below eye level on every face): without a baseline, that constant per-face anatomical offset
+was being read as constant movement every single frame.
+
+**Movement mode** — how an offset becomes cursor motion:
+
+- **Absolute (calibrated)** (default) — needs a calibration for whichever tracking source is
+  currently selected (see below); falls back to relative until one exists.
+- **Relative (dx/dy)** — the original joystick-style nudge, selectable any time, calibrated or not.
 
 That raw offset alone isn't a screen position — the same offset means a different amount of
-screen distance for different people/camera distances. **Click "Calibrate gaze" in the app
-window** to fix that: it shows 5 dots (center + 4 corners) one at a time; look at each one and
-press SPACE to record a sample. [src/gesture_os/calibration.py](src/gesture_os/calibration.py)
-fits a linear `offset -> screen pixel` mapping from those samples and saves it to
-`calibration.json` (not checked into git — recalibrate any time by clicking the button again).
-Once calibrated, the cursor jumps to an absolute screen position ("look here, cursor goes here")
-via `CursorController.move_to()`.
+screen distance for different people/camera distances, and a different amount for iris vs.
+nose/face tracking. **Click "Calibrate gaze" in the app window** to fix that: it shows 5 dots
+(center + 4 corners) one at a time; look at each one and press SPACE to record a sample.
+[src/gesture_os/calibration.py](src/gesture_os/calibration.py) fits a linear `offset -> screen
+pixel` mapping from those samples and saves it to `calibration.json` (not checked into git —
+recalibrate any time by clicking the button again). A calibration is tied to whichever tracking
+source was active when you made it; switching source afterward needs a fresh calibration for
+accurate absolute positioning. Once calibrated (and "Absolute" is selected), the cursor jumps to
+an absolute screen position ("look here, cursor goes here") via `CursorController.move_to()`.
 
-Before calibrating (or if it's deleted), `CursorController.move()` is the fallback: a *relative*
-cursor nudge via `pyautogui.moveRel`, scaled by two knobs:
-
-- `deadzone` (default `0.15`) — offsets smaller than this are treated as center/noise and ignored.
-- `sensitivity` (default `20.0`) — pixels moved per unit of offset past the deadzone.
+In relative mode (selected explicitly, or as the automatic fallback before/without a calibration),
+`CursorController.move()` nudges the cursor via `pyautogui.moveRel`, scaled by a per-axis, per-source
+**sensitivity** (pixels moved per unit of offset past a shared `deadzone`, default `0.15`) — the
+"Relative movement sensitivity" panel in the app window has four fields: Iris X, Iris Y, Nose X,
+Nose Y. **Sign matters, not just magnitude: a negative value inverts that axis' direction** — the
+defaults (`iris: x=-40, y=40`; `nose: x=-400, y=400`) already negate X, since both offset signals
+come from a raw, unmirrored camera frame where "look/turn right" maps to *smaller* image x, not
+larger (the same root cause as the handedness gotcha in recognizer.py). If movement still feels
+backwards or too slow/fast after that, flip the sign or raise the magnitude of whichever axis is
+wrong and click "Save sensitivity" — it's the only place this is calibration-free tuning that
+takes effect immediately, no camera gestures needed. Values persist to `settings.json` (not
+checked into git; see [src/gesture_os/settings.py](src/gesture_os/settings.py)) and reload
+automatically next run. Absolute (calibrated) mode doesn't need this: its fitted mapping
+self-corrects for both speed and direction from your actual calibration samples.
 
 Moving the real mouse to a screen corner is pyautogui's built-in panic button — it stops gaze
 cursor movement outright (the app catches `FailSafeException` and pauses, same as a fist gesture)
@@ -72,6 +113,7 @@ if it ever goes out of control. Make an `open_palm` gesture to resume.
 
 `gaze.py`'s `draw_debug_overlay` (imported in `ui/app.py` as `draw_gaze_overlay`) draws exactly
 what's being tracked onto the live video feed in the app window: a green dot on each eye-socket
-landmark, a red dot on each iris center. MediaPipe itself has no built-in display — this overlay,
-like the hand one above, is what makes tracking quality visible instead of only inferable from
-cursor jitter.
+landmark, a red dot on each iris center, a blue dot on the nose tip — all drawn regardless of
+which tracking source is currently selected. MediaPipe itself has no built-in display — this
+overlay, like the hand one above, is what makes tracking quality visible instead of only
+inferable from cursor jitter.

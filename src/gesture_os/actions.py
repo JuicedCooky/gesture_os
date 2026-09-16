@@ -41,25 +41,28 @@ def _apply_deadzone(value: float, deadzone: float) -> float:
 
 
 class CursorController:
-    """Moves the OS mouse cursor from an iris offset (see gaze.py).
+    """Moves the OS mouse cursor from a gaze offset (see gaze.py).
 
     `move_to()` is the primary mode: an absolute screen position from a
     fitted `GazeCalibration` (see calibration.py) — "look here, cursor goes
-    here." `move()` is the uncalibrated fallback used before a calibration
-    exists: a *relative* (joystick-style) nudge of `offset * sensitivity`
-    pixels per call, since raw offsets alone aren't precise enough for an
-    absolute mapping without calibration. `sensitivity`/`deadzone` only
-    affect that fallback.
+    here." `move()` is the fallback (available any time via the "Relative"
+    movement-mode toggle, not just before a calibration exists): a
+    *relative* (joystick-style) nudge of `offset * sensitivity` pixels per
+    call, with `sensitivity_x`/`sensitivity_y` passed in per call rather
+    than fixed at construction, since the right value differs per tracking
+    source (iris vs. nose — see settings.py, which persists them) and a
+    negative value inverts that axis' direction.
     """
 
-    def __init__(self, sensitivity: float = 20.0, deadzone: float = 0.15) -> None:
-        self.sensitivity = sensitivity
+    def __init__(self, deadzone: float = 0.15) -> None:
         self.deadzone = deadzone
 
-    def move(self, offset_x: float, offset_y: float) -> None:
-        """Uncalibrated fallback: nudge the cursor relative to where it is."""
-        dx = _apply_deadzone(offset_x, self.deadzone) * self.sensitivity
-        dy = _apply_deadzone(offset_y, self.deadzone) * self.sensitivity
+    def move(
+        self, offset_x: float, offset_y: float, sensitivity_x: float, sensitivity_y: float
+    ) -> None:
+        """Nudge the cursor relative to where it is."""
+        dx = _apply_deadzone(offset_x, self.deadzone) * sensitivity_x
+        dy = _apply_deadzone(offset_y, self.deadzone) * sensitivity_y
         if dx or dy:
             pyautogui.moveRel(dx, dy)
 

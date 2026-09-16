@@ -51,11 +51,16 @@ def _extended_fingers(hand: Hand) -> list[bool]:
     lm = hand.landmarks
 
     # Thumb: compare x position against its own knuckle, mirrored by handedness.
+    #
+    # Gotcha: MediaPipe's handedness classifier assumes a mirrored (selfie-style)
+    # input image. capture.py feeds it a raw, unmirrored frame, so the "Right"/
+    # "Left" label it returns names the opposite of the true hand — these
+    # branches are swapped from what you'd naively expect to compensate.
     thumb_tip, thumb_ip = lm[4], lm[3]
     if hand.handedness == "Right":
-        thumb_extended = thumb_tip[0] < thumb_ip[0]
-    else:
         thumb_extended = thumb_tip[0] > thumb_ip[0]
+    else:
+        thumb_extended = thumb_tip[0] < thumb_ip[0]
 
     # Other four fingers: tip above its own middle knuckle means "extended".
     others = [lm[tip_id][1] < lm[tip_id - 2][1] for tip_id in (8, 12, 16, 20)]

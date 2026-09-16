@@ -1,15 +1,23 @@
-"""Face landmark detection (MediaPipe Tasks) and iris-relative gaze offset.
+"""Face landmark detection (MediaPipe Tasks) and gaze/head-pose offsets.
 
 Same two-layer split as recognizer.py:
 
-- `iris_offset` is pure geometry over landmark coordinates, unit-testable
-  with synthetic landmark data (see tests/test_gaze.py).
+- `iris_offset` and `nose_offset` are pure geometry over landmark
+  coordinates, unit-testable with synthetic landmark data (see
+  tests/test_gaze.py). They're two alternative, interchangeable signal
+  sources for cursor control — `ui/app.py` lets the user pick between them
+  at runtime — sharing the same (x, y) roughly-[-1, 1] shape so either can
+  feed `CursorController`/`GazeCalibration` unchanged.
 - `FaceGazeTracker` wraps the actual MediaPipe `FaceLandmarker` task and
-  feeds its output through the pure function above.
+  feeds its output through whichever pure function is selected.
+- `NoseOffsetTracker` sits in front of `nose_offset` specifically: unlike
+  iris tracking, raw nose position has no natural zero (see its docstring),
+  so it reports offset relative to a captured baseline instead of the raw
+  reading.
 
 `draw_debug_overlay` is a third, separate thing: MediaPipe has no built-in
-display of its own (it only returns landmarks), so this draws the exact
-points `iris_offset` reads directly onto the frame ui/app.py already shows,
+display of its own (it only returns landmarks), so this draws the points
+both offset functions read directly onto the frame ui/app.py already shows,
 to make tracking stability visible rather than inferred from cursor jitter.
 
 Landmark indices below are MediaPipe's canonical 478-point face mesh
@@ -38,6 +46,12 @@ _RIGHT_EYE: EyeLandmarkIds = (473, 263, 362, 386, 374)
 
 _IRIS_IDS = (_LEFT_EYE[0], _RIGHT_EYE[0])
 _EYE_SOCKET_IDS = _LEFT_EYE[1:] + _RIGHT_EYE[1:]
+
+# Canonical MediaPipe face-mesh indices: nose tip, and each eye's outer
+# corner (used here as a face-scale reference, not eye-socket sizing).
+_NOSE_TIP = 1
+_LEFT_EYE_OUTER = _LEFT_EYE[1]
+_RIGHT_EYE_OUTER = _RIGHT_EYE[1]
 
 
 @dataclass(frozen=True)
@@ -78,12 +92,71 @@ def iris_offset(face: Face) -> tuple[float, float]:
     return (lx + rx) / 2, (ly + ry) / 2
 
 
+def nose_offset(face: Face) -> tuple[float, float]:
+    """Head-pose proxy: nose-tip position relative to the midpoint between
+    the eyes' outer corners, normalized by that inter-eye distance (a
+    face-scale unit that stays roughly constant as the user moves closer to
+    or farther from the camera).
+
+    Same (x, y) roughly-[-1, 1] shape and sign convention as `iris_offset`
+    (positive x toward larger image x, positive y toward larger image y) —
+    a drop-in alternative signal. Moving your head is a coarser, steadier
+    motion than moving just your eyes, at the cost of needing head movement
+    rather than only a glance to move the cursor.
+    """
+    lm = face.landmarks
+    nose = lm[_NOSE_TIP]
+    left_eye, right_eye = lm[_LEFT_EYE_OUTER], lm[_RIGHT_EYE_OUTER]
+
+    eye_span = abs(right_eye[0] - left_eye[0])
+    if eye_span == 0:
+        return 0.0, 0.0
+
+    center_x = (left_eye[0] + right_eye[0]) / 2
+    center_y = (left_eye[1] + right_eye[1]) / 2
+    return (nose[0] - center_x) / (eye_span / 2), (nose[1] - center_y) / (eye_span / 2)
+
+
+class NoseOffsetTracker:
+    """Turns `nose_offset` into a proper head-pose *movement* signal.
+
+    `nose_offset` alone has no natural zero: the nose tip sits physically
+    below eye level on every face, so its y-component is a constant
+    positive bias rather than a pitch signal that crosses zero at rest —
+    in relative mode (no calibration step to absorb a constant bias into an
+    intercept, unlike absolute mode) that reads as "always moves down."
+    There's no fixed anatomical reference that reads exactly zero at a
+    neutral pose across different faces/camera framings, so instead this
+    captures whatever `nose_offset` reads on the first call as a baseline
+    and reports the *delta* from it from then on — the same idea real
+    head-tracking mouse tools use ("recenter").
+    """
+
+    def __init__(self) -> None:
+        self._baseline: tuple[float, float] | None = None
+
+    def read(self, face: Face) -> tuple[float, float]:
+        """Nose offset relative to the baseline, capturing one if needed."""
+        raw_x, raw_y = nose_offset(face)
+        if self._baseline is None:
+            self._baseline = (raw_x, raw_y)
+        base_x, base_y = self._baseline
+        return raw_x - base_x, raw_y - base_y
+
+    def recenter(self) -> None:
+        """Discards the baseline so the next `read()` captures a fresh one —
+        call this when the user has shifted position and "centered" no
+        longer means what it used to."""
+        self._baseline = None
+
+
 def draw_debug_overlay(frame_rgb, face: Face) -> None:
-    """Draws the eye-socket corners and iris centers `iris_offset` reads,
+    """Draws the landmarks both `iris_offset` and `nose_offset` read,
     directly on `frame_rgb` in place (RGB channel order, matching the frame
     ui/app.py displays) — red dot on each iris, green dots on the eye-socket
-    landmarks used to size/center it, so tracking quality is visible in the
-    UI itself rather than inferred from how the cursor moves.
+    landmarks used to size/center it, blue dot on the nose tip — so tracking
+    quality is visible in the UI itself rather than inferred from how the
+    cursor moves. Drawn regardless of which signal is currently selected.
     """
     height, width = frame_rgb.shape[:2]
 
@@ -95,6 +168,7 @@ def draw_debug_overlay(frame_rgb, face: Face) -> None:
         cv2.circle(frame_rgb, pixel(idx), 2, (0, 255, 0), thickness=-1)
     for idx in _IRIS_IDS:
         cv2.circle(frame_rgb, pixel(idx), 4, (255, 0, 0), thickness=-1)
+    cv2.circle(frame_rgb, pixel(_NOSE_TIP), 4, (0, 0, 255), thickness=-1)
 
 
 class FaceGazeTracker:
