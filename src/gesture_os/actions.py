@@ -56,24 +56,38 @@ class CursorController:
     here." `move()` is the fallback (available any time via the "Relative"
     movement-mode toggle, not just before a calibration exists): a
     *relative* (joystick-style) nudge of `offset * sensitivity` pixels per
-    call, with `sensitivity_x`/`sensitivity_y` passed in per call rather
-    than fixed at construction, since the right value differs per tracking
-    source (iris vs. nose — see settings.py, which persists them) and a
-    negative value inverts that axis' direction.
+    call. `sensitivity_x`/`sensitivity_y`/`deadzone_x`/`deadzone_y` are all
+    passed in per call rather than fixed at construction, since the right
+    values differ per tracking source (iris vs. nose — see settings.py,
+    which persists them) — a negative sensitivity inverts that axis'
+    direction, and a larger deadzone needs more offset on that axis before
+    the cursor starts moving at all (filters out jitter near center, at the
+    cost of a small dead spot). X and Y are independent: e.g. a face that
+    jitters more horizontally than vertically at rest can have a larger X
+    deadzone without also dulling vertical response.
     """
 
-    def __init__(self, deadzone: float = 0.15) -> None:
-        self.deadzone = deadzone
-
     def move(
-        self, offset_x: float, offset_y: float, sensitivity_x: float, sensitivity_y: float
+        self,
+        offset_x: float,
+        offset_y: float,
+        sensitivity_x: float,
+        sensitivity_y: float,
+        deadzone_x: float = 0.15,
+        deadzone_y: float = 0.15,
     ) -> None:
         """Nudge the cursor relative to where it is."""
-        dx = _apply_deadzone(offset_x, self.deadzone) * sensitivity_x
-        dy = _apply_deadzone(offset_y, self.deadzone) * sensitivity_y
+        dx = _apply_deadzone(offset_x, deadzone_x) * sensitivity_x
+        dy = _apply_deadzone(offset_y, deadzone_y) * sensitivity_y
         if dx or dy:
             pyautogui.moveRel(dx, dy)
 
     def move_to(self, x: int, y: int) -> None:
         """Calibrated mode: move the cursor to an absolute screen position."""
         pyautogui.moveTo(x, y)
+
+
+def click(button: str = "left") -> None:
+    """Fires a single mouse click — used for wink-to-click (see
+    gaze.WinkClickDetector), which already debounces to one call per wink."""
+    pyautogui.click(button=button)

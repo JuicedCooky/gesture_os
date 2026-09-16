@@ -49,6 +49,21 @@ class Settings:
     # this number (see ui/app.py's _tick). Lower = tries to update sooner;
     # only matters once actual per-tick processing is faster than this.
     poll_ms: int = 1
+    # Nose/face relative-movement deadzone, independent per axis: offset
+    # smaller than this on that axis (in the same units as nose_offset's
+    # roughly-[-1, 1] range) is treated as center/noise and doesn't move
+    # the cursor on that axis at all. Adjustable via two sliders in the app
+    # window, next to the sensitivity fields — nose tracking only for now
+    # (iris keeps CursorController.move's built-in default) since head
+    # position tends to be noisier at rest than iris.
+    nose_deadzone_x: float = 0.15
+    nose_deadzone_y: float = 0.15
+    # How closed an eye's "eyeBlinkLeft"/"eyeBlinkRight" blendshape score
+    # (0=open, 1=fully closed) must be to count as a deliberate wink for
+    # click detection (see gaze.detect_wink). A real portrait with both
+    # eyes open measured ~0.26-0.27 on this scale; 0.5 leaves margin above
+    # normal open-eye noise without requiring a maximally scrunched wink.
+    wink_threshold: float = 0.5
 
     @staticmethod
     def defaults() -> Settings:
@@ -58,6 +73,9 @@ class Settings:
             tracking_source="iris",
             movement_mode="absolute",
             poll_ms=1,
+            nose_deadzone_x=0.15,
+            nose_deadzone_y=0.15,
+            wink_threshold=0.5,
         )
 
 
@@ -67,6 +85,13 @@ def load_settings(path: Path = DEFAULT_SETTINGS_PATH) -> Settings:
         return Settings.defaults()
     data = json.loads(path.read_text())
     defaults = Settings.defaults()
+    # A settings.json saved before X/Y were split had one "nose_deadzone"
+    # key shared by both axes; use it as the fallback for each axis so an
+    # older file migrates to the same behavior it had before, rather than
+    # silently resetting to the (different) default.
+    old_deadzone = data.get("nose_deadzone")
+    deadzone_x_fallback = defaults.nose_deadzone_x if old_deadzone is None else old_deadzone
+    deadzone_y_fallback = defaults.nose_deadzone_y if old_deadzone is None else old_deadzone
     return Settings(
         iris=AxisSensitivity(**data["iris"]),
         nose=AxisSensitivity(**data["nose"]),
@@ -75,6 +100,9 @@ def load_settings(path: Path = DEFAULT_SETTINGS_PATH) -> Settings:
         tracking_source=data.get("tracking_source", defaults.tracking_source),
         movement_mode=data.get("movement_mode", defaults.movement_mode),
         poll_ms=data.get("poll_ms", defaults.poll_ms),
+        nose_deadzone_x=data.get("nose_deadzone_x", deadzone_x_fallback),
+        nose_deadzone_y=data.get("nose_deadzone_y", deadzone_y_fallback),
+        wink_threshold=data.get("wink_threshold", defaults.wink_threshold),
     )
 
 
@@ -87,6 +115,9 @@ def save_settings(settings: Settings, path: Path = DEFAULT_SETTINGS_PATH) -> Non
                 "tracking_source": settings.tracking_source,
                 "movement_mode": settings.movement_mode,
                 "poll_ms": settings.poll_ms,
+                "nose_deadzone_x": settings.nose_deadzone_x,
+                "nose_deadzone_y": settings.nose_deadzone_y,
+                "wink_threshold": settings.wink_threshold,
             }
         )
     )

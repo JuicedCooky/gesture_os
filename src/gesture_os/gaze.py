@@ -14,6 +14,12 @@ Same two-layer split as recognizer.py:
   iris tracking, raw nose position has no natural zero (see its docstring),
   so it reports offset relative to a captured baseline instead of the raw
   reading.
+- `detect_wink`/`eye_blink_scores` are pure over `Face.blendshapes` — a
+  wink-to-click signal, distinct from the gaze/cursor signals above.
+  `WinkClickDetector` sits in front of `detect_wink` the way
+  `NoseOffsetTracker` sits in front of `nose_offset`: turning a level
+  ("eye is currently closed") into an edge ("eye just closed"), since a
+  click should fire once per wink, not once per frame it's held.
 
 `draw_debug_overlay` is a third, separate thing: MediaPipe has no built-in
 display of its own (it only returns landmarks), so this draws the points
@@ -27,7 +33,7 @@ Landmark indices below are MediaPipe's canonical 478-point face mesh
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import cv2
@@ -56,9 +62,13 @@ _RIGHT_EYE_OUTER = _RIGHT_EYE[1]
 
 @dataclass(frozen=True)
 class Face:
-    """A single detected face's landmarks, normalized to [0, 1] image coords."""
+    """A single detected face's landmarks, normalized to [0, 1] image coords,
+    plus MediaPipe's named "blendshape" scores (0-1 each, e.g. "eyeBlinkLeft")
+    — an ARKit-style facial-expression estimate, not derived from `landmarks`
+    by this code. Empty if the tracker wasn't asked to compute them."""
 
     landmarks: list[Point]
+    blendshapes: dict[str, float] = field(default_factory=dict)
 
 
 def _eye_offset(lm: list[Point], eye: EyeLandmarkIds) -> tuple[float, float]:
@@ -115,6 +125,51 @@ def nose_offset(face: Face) -> tuple[float, float]:
     center_x = (left_eye[0] + right_eye[0]) / 2
     center_y = (left_eye[1] + right_eye[1]) / 2
     return (nose[0] - center_x) / (eye_span / 2), (nose[1] - center_y) / (eye_span / 2)
+
+
+def eye_blink_scores(face: Face) -> tuple[float, float]:
+    """The (left, right) "eyeBlinkLeft"/"eyeBlinkRight" blendshape scores,
+    each roughly 0 (open) to 1 (fully closed) — MediaPipe's own estimate,
+    not geometry computed from `landmarks` by this code. 0.0 for either eye
+    not present (e.g. blendshapes weren't requested from the tracker)."""
+    return face.blendshapes.get("eyeBlinkLeft", 0.0), face.blendshapes.get("eyeBlinkRight", 0.0)
+
+
+def detect_wink(face: Face, threshold: float) -> str | None:
+    """"left" or "right" if *only* that eye is closed past `threshold` right
+    now, else None — including when both eyes are open, and deliberately
+    also when both are closed together (an ordinary blink, not a wink)."""
+    left, right = eye_blink_scores(face)
+    left_closed, right_closed = left >= threshold, right >= threshold
+    if left_closed and not right_closed:
+        return "left"
+    if right_closed and not left_closed:
+        return "right"
+    return None
+
+
+class WinkClickDetector:
+    """Turns `detect_wink` into an edge-triggered click signal.
+
+    `detect_wink` is level-triggered (true for as long as the eye stays
+    closed), but a click should fire once per wink, not once per frame the
+    eye happens to still be shut — otherwise holding a wink for even a
+    third of a second would fire dozens of clicks. `update()` returns the
+    eye label only on the frame a wink *begins*; holding it, or both eyes
+    open, both return None.
+    """
+
+    def __init__(self) -> None:
+        self._active_eye: str | None = None
+
+    def update(self, face: Face, threshold: float) -> str | None:
+        eye = detect_wink(face, threshold)
+        if eye is not None and eye != self._active_eye:
+            self._active_eye = eye
+            return eye
+        if eye is None:
+            self._active_eye = None
+        return None
 
 
 class NoseOffsetTracker:
@@ -189,6 +244,7 @@ class FaceGazeTracker:
             running_mode=vision.RunningMode.VIDEO,
             num_faces=1,
             min_face_detection_confidence=min_detection_confidence,
+            output_face_blendshapes=True,
         )
         self._landmarker = vision.FaceLandmarker.create_from_options(options)
         self._last_timestamp_ms = -1
@@ -205,7 +261,12 @@ class FaceGazeTracker:
         if not result.face_landmarks:
             return None
         points = [(p.x, p.y, p.z) for p in result.face_landmarks[0]]
-        return Face(landmarks=points)
+        blendshapes = (
+            {c.category_name: c.score for c in result.face_blendshapes[0]}
+            if result.face_blendshapes
+            else {}
+        )
+        return Face(landmarks=points, blendshapes=blendshapes)
 
     def close(self) -> None:
         self._landmarker.close()

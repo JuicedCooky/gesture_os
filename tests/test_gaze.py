@@ -2,7 +2,16 @@
 
 import numpy as np
 
-from gesture_os.gaze import Face, NoseOffsetTracker, draw_debug_overlay, iris_offset, nose_offset
+from gesture_os.gaze import (
+    Face,
+    NoseOffsetTracker,
+    WinkClickDetector,
+    detect_wink,
+    draw_debug_overlay,
+    eye_blink_scores,
+    iris_offset,
+    nose_offset,
+)
 
 
 def _face(overrides: dict[int, tuple[float, float]]) -> Face:
@@ -12,6 +21,12 @@ def _face(overrides: dict[int, tuple[float, float]]) -> Face:
     for idx, (x, y) in overrides.items():
         landmarks[idx] = (x, y, 0.0)
     return Face(landmarks=landmarks)
+
+
+def _blink_face(left: float, right: float) -> Face:
+    """A Face with only blink blendshape scores set; landmarks are
+    irrelevant to eye_blink_scores/detect_wink so left empty."""
+    return Face(landmarks=[], blendshapes={"eyeBlinkLeft": left, "eyeBlinkRight": right})
 
 
 def _eye_landmarks(
@@ -108,6 +123,64 @@ def test_nose_offset_tracker_recenter_captures_a_fresh_baseline():
 
     tracker.recenter()
     assert tracker.read(face_b) == (0.0, 0.0)  # face_b is now the new baseline
+
+
+def test_eye_blink_scores_reads_named_blendshapes():
+    face = _blink_face(left=0.8, right=0.1)
+    assert eye_blink_scores(face) == (0.8, 0.1)
+
+
+def test_eye_blink_scores_defaults_to_zero_without_blendshapes():
+    face = Face(landmarks=[])  # blendshapes not requested/available
+    assert eye_blink_scores(face) == (0.0, 0.0)
+
+
+def test_detect_wink_left_eye_alone_closed():
+    face = _blink_face(left=0.9, right=0.1)
+    assert detect_wink(face, threshold=0.5) == "left"
+
+
+def test_detect_wink_right_eye_alone_closed():
+    face = _blink_face(left=0.1, right=0.9)
+    assert detect_wink(face, threshold=0.5) == "right"
+
+
+def test_detect_wink_both_eyes_open_is_not_a_wink():
+    face = _blink_face(left=0.1, right=0.1)
+    assert detect_wink(face, threshold=0.5) is None
+
+
+def test_detect_wink_both_eyes_closed_is_an_ordinary_blink_not_a_wink():
+    # This is the key distinction the feature is built around: a normal
+    # blink closes both eyes together and must NOT register as a click.
+    face = _blink_face(left=0.9, right=0.9)
+    assert detect_wink(face, threshold=0.5) is None
+
+
+def test_wink_click_detector_fires_once_on_the_frame_a_wink_begins():
+    detector = WinkClickDetector()
+    winking = _blink_face(left=0.9, right=0.1)
+
+    assert detector.update(winking, threshold=0.5) == "left"
+
+
+def test_wink_click_detector_does_not_repeat_while_held():
+    detector = WinkClickDetector()
+    winking = _blink_face(left=0.9, right=0.1)
+
+    detector.update(winking, threshold=0.5)  # first frame: fires
+    assert detector.update(winking, threshold=0.5) is None  # still held: doesn't
+    assert detector.update(winking, threshold=0.5) is None  # still held: doesn't
+
+
+def test_wink_click_detector_fires_again_after_release_and_re_wink():
+    detector = WinkClickDetector()
+    winking = _blink_face(left=0.9, right=0.1)
+    open_eyes = _blink_face(left=0.1, right=0.1)
+
+    assert detector.update(winking, threshold=0.5) == "left"
+    assert detector.update(open_eyes, threshold=0.5) is None  # released
+    assert detector.update(winking, threshold=0.5) == "left"  # wink again: fires
 
 
 def test_draw_debug_overlay_marks_iris_pixel():

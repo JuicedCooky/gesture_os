@@ -6,16 +6,17 @@ app state rather than firing a stateless OS action. Gestures are classified in
 [src/gesture_os/recognizer.py](src/gesture_os/recognizer.py) by the number of extended fingers on
 one hand.
 
-| Gesture      | Hand shape                        | Extended fingers | Action                |
-| ------------ | ---------------------------------- | :---------------: | --------------------- |
-| `fist`       | closed hand                        | 0                  | **Pause** gaze cursor |
-| `point`      | index finger only                  | 1                  | *(unbound)*           |
-| `peace`      | index + middle finger               | 2                  | *(unbound)*           |
-| `open_palm`  | all five fingers extended          | 5                  | **Resume** gaze cursor|
-| `unknown`    | any other count (3 or 4 fingers)   | 3, 4               | No action              |
+| Gesture      | Hand shape                        | Extended fingers | Action                        |
+| ------------ | ---------------------------------- | :---------------: | ------------------------------ |
+| `fist`       | closed hand                        | 0                  | **Pause** gaze cursor          |
+| `point`      | index finger only                  | 1                  | *(unbound)*                    |
+| `peace`      | index + middle finger               | 2                  | **Recenter head position**     |
+| `open_palm`  | all five fingers extended          | 5                  | **Resume** gaze cursor         |
+| `unknown`    | any other count (3 or 4 fingers)   | 3, 4               | No action                      |
 
-`point`/`peace` previously triggered volume up/down; that binding was removed and left empty for
-now — see "Adding or changing a binding" below to rebind them.
+`point`/`peace` previously triggered volume up/down; that binding was removed. `peace` was later
+rebound to recenter head/nose tracking (same as the "Recenter head position" button — see Cursor
+movement below); `point` is still unbound — see "Adding or changing a binding" below to rebind it.
 
 Pausing/resuming only stops cursor *movement* — the video feed, iris tracking, and its debug
 overlay keep running the whole time, and fist/peace/point still fire while paused. Current state
@@ -26,6 +27,13 @@ The large **Mouse Control: ON/OFF** button at the top of the app window does the
 pause/resume as `fist`/`open_palm` — it's a second way to reach the same on/off state (for when
 gesturing isn't convenient), not a separate switch. Whichever one you use last — gesture or
 button — is reflected in both: the button's label/color and the "gaze:" status line always agree.
+
+**"Show gesture guide"** opens a small reference window listing every gesture/wink and what it
+currently does — this table, condensed. Click it again (or if it's still open) to bring the same
+window to front rather than opening a duplicate; closing it and clicking again opens a fresh one.
+It's a fixed lookup table in [ui/app.py](src/gesture_os/ui/app.py) (`_GESTURE_GUIDE`), not a live
+introspection of the real bindings, so if you rebind a gesture (see "Adding or changing a binding"
+below) update that table by hand too or the guide will drift from what actually happens.
 
 ## Adding or changing a binding
 
@@ -71,14 +79,15 @@ Both signals return the same shape of value (roughly [-1, 1] per axis, same sign
 either can drive `CursorController`/`GazeCalibration` unchanged — switching the toggle mid-session
 just changes which one feeds them from the next frame on.
 
-**Recenter head position** — click this any time nose tracking feels off-center (after shifting in
-your seat, leaning back, etc.): it discards `NoseOffsetTracker`'s current baseline, and the very
-next frame's nose position becomes the new "centered" reading. The first time nose tracking is
-ever used, a baseline is captured automatically the same way — you don't need to click it before
-first use, only when your "neutral" position has changed. **This is also the fix for nose
-relative movement always dragging the cursor one direction** (nearly always down, since the nose
-sits below eye level on every face): without a baseline, that constant per-face anatomical offset
-was being read as constant movement every single frame.
+**Recenter head position** — click this button, or make a `peace` gesture (either does the exact
+same thing), any time nose tracking feels off-center (after shifting in your seat, leaning back,
+etc.): it discards `NoseOffsetTracker`'s current baseline, and the very next frame's nose position
+becomes the new "centered" reading. The first time nose tracking is ever used, a baseline is
+captured automatically the same way — you don't need to trigger it before first use, only when
+your "neutral" position has changed. **This is also the fix for nose relative movement always
+dragging the cursor one direction** (nearly always down, since the nose sits below eye level on
+every face): without a baseline, that constant per-face anatomical offset was being read as
+constant movement every single frame.
 
 **Movement mode** — how an offset becomes cursor motion:
 
@@ -99,12 +108,12 @@ an absolute screen position ("look here, cursor goes here") via `CursorControlle
 
 In relative mode (selected explicitly, or as the automatic fallback before/without a calibration),
 `CursorController.move()` nudges the cursor via `pyautogui.moveRel`, scaled by a per-axis, per-source
-**sensitivity** (pixels moved per unit of offset past a shared `deadzone`, default `0.15`) — the
-"Relative movement sensitivity" panel in the app window shows only the two fields (X, Y) for
-whichever tracking source is currently selected — Iris X/Y while "Iris" is chosen, Nose X/Y while
-"Face / nose" is — switching the toggle swaps which pair is visible immediately, since only one of
-them is ever relevant to what's currently moving the cursor. **Sign matters, not just magnitude: a
-negative value inverts that axis' direction** — the
+**sensitivity** (pixels moved per unit of offset past a **deadzone**) — the "Relative movement
+sensitivity" panel in the app window shows only the fields for whichever tracking source is
+currently selected — Iris X/Y while "Iris" is chosen, Nose X/Y (plus a **Nose deadzone slider**,
+see below) while "Face / nose" is — switching the toggle swaps which is visible immediately, since
+only one is ever relevant to what's currently moving the cursor. **Sign matters, not just
+magnitude: a negative value inverts that axis' direction** — the
 defaults (`iris: x=-40, y=40`; `nose: x=-400, y=400`) already negate X, since both offset signals
 come from a raw, unmirrored camera frame where "look/turn right" maps to *smaller* image x, not
 larger (the same root cause as the handedness gotcha in recognizer.py). If movement still feels
@@ -112,11 +121,23 @@ backwards or too slow/fast after that, flip the sign or raise the magnitude of w
 wrong and click "Save settings". Absolute (calibrated) mode doesn't need this: its fitted mapping
 self-corrects for both speed and direction from your actual calibration samples.
 
-**"Save settings"** persists everything currently selected — both sensitivity fields *and* the
-Tracking source / Movement mode radio buttons — to `settings.json` (not checked into git; see
-[src/gesture_os/settings.py](src/gesture_os/settings.py)), and all of it reloads automatically
-next run, so a session picks up exactly where you left off. Flipping a radio button or editing a
-sensitivity field takes effect immediately in the running app either way; clicking "Save settings"
+**Nose deadzone X / Y sliders** (next to the Nose X/Y sensitivity fields, only shown in nose
+tracking mode): how far off-center your nose has to move on *that axis* before the cursor starts
+moving on it at all — independent per axis, since a face can jitter more on one axis than the
+other at rest (e.g. more horizontal wobble than vertical), and you may want one axis more forgiving
+than the other without dulling the other's response. Raise an axis's deadzone if small jitter on it
+nudges the cursor when you don't want it to; lower it if that axis feels sluggish to start moving.
+Both are sliders (range 0-0.5, live-updating labels showing the current values), not free-text
+fields, since the values only make sense within that range. Iris tracking doesn't have its own
+sliders yet — it uses `CursorController.move`'s built-in default (`0.15` for both axes) regardless
+of these.
+
+**"Save settings"** persists everything currently selected — both sensitivity fields, both nose
+deadzone sliders, the tick interval, *and* the Tracking source / Movement mode radio buttons — to
+`settings.json` (not checked into git; see [src/gesture_os/settings.py](src/gesture_os/settings.py)),
+and all of it reloads automatically next run, so a session picks up exactly where you left off.
+Flipping a radio button, moving the slider, or editing a sensitivity field takes effect immediately
+in the running app either way; clicking "Save settings"
 only controls whether that choice is still there the *next* time you launch it.
 
 Moving the real mouse to a screen corner is pyautogui's built-in panic button — it stops gaze
@@ -141,9 +162,45 @@ this number. Lower generally means smoother (tries again sooner) at the cost of 
 if you'd rather trade smoothness for lower CPU usage. Persists with "Save settings" like everything
 else here.
 
+Right below it, **"Actual tick rate"** shows the *real*, currently measured rate (smoothed, so one
+stray slow/fast tick doesn't make it jump around) — e.g. "8.3 ms/tick (~120 fps)". This is wall-clock
+time for the whole loop (camera read + both MediaPipe inferences + drawing + the delay itself), not
+just the "Tick interval" setting, so it's the honest number to check if movement feels like it's
+slowed down: if this reading has dropped noticeably from what it normally reads, something in that
+loop (camera, CPU load from another program, thermal throttling, etc.) is the actual bottleneck —
+not necessarily anything in this app's own code. Resets to "(warming up...)" on stop/restart so a
+paused gap never gets counted as one enormous "tick."
+
 `gaze.py`'s `draw_debug_overlay` (imported in `ui/app.py` as `draw_gaze_overlay`) draws exactly
 what's being tracked onto the live video feed in the app window: a green dot on each eye-socket
 landmark, a red dot on each iris center, a blue dot on the nose tip — all drawn regardless of
 which tracking source is currently selected. MediaPipe itself has no built-in display — this
 overlay, like the hand one above, is what makes tracking quality visible instead of only
 inferable from cursor jitter.
+
+## Wink to click
+
+Winking one eye alone — not blinking both together — fires a mouse click: **left** eye triggers a
+**left** click, **right** eye a **right** click. This runs independently of the gesture/cursor
+toggles above (works regardless of which tracking source or movement mode is selected), and is
+suppressed while "Mouse Control" is off (the big button, or a `fist` gesture) — same as cursor
+movement, since a click is also a form of mouse control.
+
+The signal is MediaPipe's own `eyeBlinkLeft`/`eyeBlinkRight` blendshapes (one of 52 named
+facial-expression scores the Face Landmarker model outputs directly, 0 = open to 1 = fully
+closed) — not geometry computed from landmarks by this code, and more robust than that would be.
+`gaze.detect_wink(face, threshold)` reports "left"/"right" only when *one* eye is closed past
+threshold and the other isn't — both eyes closing together is treated as an ordinary blink and
+deliberately produces no click.
+
+**Wink threshold** slider (range 0-1, live-updating label): how closed an eye's blendshape score
+must be to count as "closed" for wink purposes. Lower it if genuine winks aren't registering,
+raise it if it's firing on partial eye narrowing you didn't intend as a wink. A real test photo
+with both eyes normally open measured ~0.27 on this scale, so the default of `0.5` leaves
+meaningful margin above ordinary open-eye noise. Persists with "Save settings" like everything
+else in this document.
+
+A click only fires once per wink, not once per frame the eye stays shut — `gaze.WinkClickDetector`
+tracks the *transition* into a wink (open → closed), not just "is currently closed", so holding a
+wink for half a second doesn't fire a dozen clicks. Release (open both eyes, or switch which eye
+you're winking) before the next wink will register again.
