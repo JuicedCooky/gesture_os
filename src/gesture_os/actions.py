@@ -6,6 +6,14 @@ from collections.abc import Callable
 
 import pyautogui
 
+# pyautogui's default is a 0.1s sleep after *every* call, meant for scripted
+# automation you can visually track — but CursorController.move()/move_to()
+# are called once per camera frame for continuous real-time tracking, so
+# that default alone caps cursor updates to ~10/sec regardless of how fast
+# the capture loop runs, and is the main source of choppy cursor movement.
+# FAILSAFE (dragging the mouse to a screen corner to abort) is left on.
+pyautogui.PAUSE = 0.0
+
 GestureAction = Callable[[], None]
 
 

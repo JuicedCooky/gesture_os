@@ -15,9 +15,11 @@ maps to an absolute screen position — "look here, cursor goes here" — vs. re
 nudging, selectable any time regardless of calibration). A large "Mouse Control: ON/OFF" button and
 `fist`/`open_palm` both pause/resume gaze cursor movement — same single state either way, not two
 switches (tracking/overlay keep running either way) — with current state shown in its own status
-label and the button's own text/color. "Save settings" persists both toggles plus per-source
-sensitivity to `settings.json`, restored at startup. The UI is a Python desktop app (Tkinter). The
-cursor-control feature is experimental and being tuned for stability.
+label and the button's own text/color. "Save settings" persists both toggles, per-source
+sensitivity, and the tick-loop poll interval to `settings.json`, restored at startup. The UI is a
+Python desktop app (Tkinter). The cursor-control feature is experimental and being tuned for
+stability and smoothness — `pyautogui.PAUSE`'s 0.1s-per-call default was found capping cursor
+updates to 10/sec regardless of anything else in the app; see actions.py.
 
 This project was scaffolded from an empty repo; the current code is a minimal working skeleton, not
 a feature-complete app.
@@ -157,12 +159,13 @@ WebcamCapture -- frame
     moving the cursor, on `frame_rgb` in place (RGB color order — it's the same array displayed).
 - **`settings.py`** — persists the user's cursor-control preferences to `settings.json` at the repo
   root (gitignored): per-source relative-movement sensitivity (`AxisSensitivity(x, y)` for both
-  `iris` and `nose`), plus `tracking_source`/`movement_mode` (the two `ui/app.py` radio-button
-  states) so a session resumes exactly where it left off. `load_settings()` returns
-  `Settings.defaults()` if none is saved yet, and fills in `tracking_source`/`movement_mode` with
-  defaults via `.get()` if loading an older settings.json saved before those fields existed —
-  don't replace that with direct key access, it'll raise `KeyError` on such a file (there's a real
-  one from before this feature that this was written against). Sign matters on sensitivity: a
+  `iris` and `nose`), `tracking_source`/`movement_mode` (the two `ui/app.py` radio-button states),
+  and `poll_ms` (the tick-loop interval — see its own field docstring for what it actually
+  controls) so a session resumes exactly where it left off. `load_settings()` returns
+  `Settings.defaults()` if none is saved yet, and fills in any of these with defaults via `.get()`
+  if loading an older settings.json saved before that field existed — don't replace that with
+  direct key access, it'll raise `KeyError` on such a file (there's a real one from before this
+  feature that this was written against). Sign matters on sensitivity: a
   negative axis value inverts that axis' direction. The sensitivity defaults negate x for the same
   raw-frame-mirroring reason as recognizer.py's handedness gotcha — "look/turn right" maps to
   *smaller* image x in an unmirrored frame — but are starting points, not verified against a real
@@ -182,6 +185,12 @@ WebcamCapture -- frame
   `get_offset` callback, not a direct dependency, so this stays decoupled from `GestureOsApp`).
   Fits and saves the calibration once all 5 points are captured, then calls `on_complete`.
 - **`actions.py`** — the OS-effecting layer for both pipelines:
+  - Sets `pyautogui.PAUSE = 0` at module import. pyautogui's default (0.1s slept after *every*
+    call, meant for scripted automation you can visually track) was capping `CursorController`'s
+    real-time, once-per-frame cursor updates to 10/sec regardless of anything else in the app —
+    measured as the dominant bottleneck for cursor smoothness, well beyond `ui/app.py`'s tick
+    interval. `FAILSAFE` is left at its default (on) — that's the panic-button escape hatch, not
+    a per-call throttle, so there's no tension between removing PAUSE and keeping it.
   - `ActionDispatcher` maps a gesture name to a zero-arg callable via a plain
     `dict[str, Callable[[], None]]` (`default_action_map`). `default_action_map()` is currently
     `{}` — `point`/`peace` had volume up/down but that binding was removed and left unbound, and
@@ -202,6 +211,12 @@ WebcamCapture -- frame
   any resulting gesture, then `draw_hand_overlay`) and the face gaze tracker (moving the cursor via
   calibrated or fallback mode, tracked in `self.calibration`, then `draw_gaze_overlay`), and redraws
   the frame in the video `Label`.
+  - `self._poll_ms()` reads `self.poll_ms_var` (the "Tick interval (ms)" field) live for
+    `root.after`'s delay each tick, clamped to `>= 0`, falling back to `_DEFAULT_POLL_MS` on a
+    `tk.TclError` from a non-numeric entry. Not a fixed-rate timer: it's the *minimum* delay after
+    a tick finishes before the next is scheduled, so it only matters once a tick's own work
+    (capture + two MediaPipe inferences + drawing, ~10ms measured for inference alone on a blank
+    frame) is faster than it — lowering it below that floor does nothing further.
   - `self.tracking_source_var` (`tk.StringVar`, "iris"/"nose") — read fresh each tick in `_tick` to
     pick `iris_offset(face)` or `self.nose_tracker.read(face)` (never raw `nose_offset` directly —
     see the gotcha in gaze.py's entry above); nothing is cached, so flipping the radio button takes
@@ -215,12 +230,13 @@ WebcamCapture -- frame
     combination, calibration permitting). In relative mode, `_move_cursor` also re-reads
     `self.tracking_source_var` to pick `self.settings.iris` vs `.nose` for `CursorController.move`.
   - `self.settings` (a `settings.Settings`, loaded at startup) backs four `tk.DoubleVar`s (Iris/Nose
-    × X/Y) in the "Relative movement sensitivity" panel, and seeds `tracking_source_var`/
-    `movement_mode_var`'s *initial* value (their live value is whatever the radio buttons currently
-    show, read fresh every tick — see above). All of it is edited freely at runtime and only
+    × X/Y) in the "Relative movement sensitivity" panel, `self.poll_ms_var` (an `tk.IntVar`) in the
+    "Performance" panel, and seeds `tracking_source_var`/`movement_mode_var`'s *initial* value
+    (their live value is whatever the radio buttons currently show, read fresh every tick — see
+    above). All of it is edited freely at runtime and only
     persisted on "Save settings" (`_save_settings`), which rebuilds `self.settings` from the current
-    var values (sensitivity fields *and* both radio-button choices) and calls `settings.save_settings`
-    — a `tk.TclError` from a non-numeric sensitivity entry is caught and reported in
+    var values (sensitivity fields, both radio-button choices, and poll interval) and calls
+    `settings.save_settings` — a `tk.TclError` from a non-numeric entry is caught and reported in
     `settings_status_var` rather than crashing or silently keeping stale values.
   - `self.iris_sensitivity_frame`/`self.nose_sensitivity_frame` hold the Iris X/Y and Nose X/Y
     entry rows respectively, both children of the same `sensitivity_frame`, but only one is ever

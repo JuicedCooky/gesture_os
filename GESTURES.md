@@ -123,6 +123,24 @@ Moving the real mouse to a screen corner is pyautogui's built-in panic button �
 cursor movement outright (the app catches `FailSafeException` and pauses, same as a fist gesture)
 if it ever goes out of control. Make an `open_palm` gesture to resume.
 
+**Cursor smoothness:** pyautogui defaults to a 0.1s pause after *every* call it makes, meant for
+scripted automation you can visually track — but `CursorController` calls it once per camera
+frame, so that default alone was capping cursor updates to **10 per second**, regardless of
+anything else, which is what made movement feel choppy. [actions.py](src/gesture_os/actions.py)
+now sets `pyautogui.PAUSE = 0` at import (measured: this alone is a >1000x reduction in per-call
+overhead). With that removed, the real ceiling is MediaPipe inference (~10ms for both hand and
+face detection combined, measured on a blank frame — real frames may run somewhat slower) plus
+your webcam's own frame rate, so cursor updates should now track your actual camera FPS rather
+than being artificially capped at 10/sec.
+
+The **"Tick interval (ms)"** field in the "Performance" panel is the other half of this: it's the
+minimum delay before the next capture/inference/move cycle after the current one finishes — not a
+fixed-rate timer, so if a cycle's own work takes longer than this value, that's the real limit, not
+this number. Lower generally means smoother (tries again sooner) at the cost of more CPU use;
+1-2ms is already "as fast as this machine's processing allows" for most setups, so raise it instead
+if you'd rather trade smoothness for lower CPU usage. Persists with "Save settings" like everything
+else here.
+
 `gaze.py`'s `draw_debug_overlay` (imported in `ui/app.py` as `draw_gaze_overlay`) draws exactly
 what's being tracked onto the live video feed in the app window: a green dot on each eye-socket
 landmark, a red dot on each iris center, a blue dot on the nose tip — all drawn regardless of

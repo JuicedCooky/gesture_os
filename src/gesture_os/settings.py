@@ -1,5 +1,6 @@
 """Persists the user's cursor-control preferences: per-source relative-
-movement sensitivity, plus the last-used tracking source and movement mode.
+movement sensitivity, the last-used tracking source and movement mode, and
+the tick-loop poll interval (see `poll_ms` below).
 
 Two independent (x, y) sensitivity pairs — one for iris tracking, one for
 face/nose tracking — since the two offset signals (see gaze.py) have very
@@ -42,6 +43,12 @@ class Settings:
     nose: AxisSensitivity
     tracking_source: str = "iris"  # "iris" or "nose"
     movement_mode: str = "absolute"  # "absolute" or "relative"
+    # Minimum delay (ms) before scheduling the next capture/inference/move
+    # tick after the current one finishes — not a fixed-rate timer; if a
+    # tick's own work takes longer than this, that's the real limit, not
+    # this number (see ui/app.py's _tick). Lower = tries to update sooner;
+    # only matters once actual per-tick processing is faster than this.
+    poll_ms: int = 1
 
     @staticmethod
     def defaults() -> Settings:
@@ -50,6 +57,7 @@ class Settings:
             nose=AxisSensitivity(x=-400.0, y=400.0),
             tracking_source="iris",
             movement_mode="absolute",
+            poll_ms=1,
         )
 
 
@@ -66,6 +74,7 @@ def load_settings(path: Path = DEFAULT_SETTINGS_PATH) -> Settings:
         # existed shouldn't fail to load, just fall back to the default mode.
         tracking_source=data.get("tracking_source", defaults.tracking_source),
         movement_mode=data.get("movement_mode", defaults.movement_mode),
+        poll_ms=data.get("poll_ms", defaults.poll_ms),
     )
 
 
@@ -77,6 +86,7 @@ def save_settings(settings: Settings, path: Path = DEFAULT_SETTINGS_PATH) -> Non
                 "nose": asdict(settings.nose),
                 "tracking_source": settings.tracking_source,
                 "movement_mode": settings.movement_mode,
+                "poll_ms": settings.poll_ms,
             }
         )
     )

@@ -45,7 +45,7 @@ def test_save_and_load_round_trip_includes_tracking_source_and_movement_mode(tmp
 
 
 def test_load_settings_fills_in_missing_fields_from_an_older_file(tmp_path):
-    # A settings.json saved before tracking_source/movement_mode existed.
+    # A settings.json saved before tracking_source/movement_mode/poll_ms existed.
     path = tmp_path / "settings.json"
     path.write_text(
         json.dumps({"iris": {"x": -400.0, "y": 400.0}, "nose": {"x": -400.0, "y": 400.0}})
@@ -56,3 +56,16 @@ def test_load_settings_fills_in_missing_fields_from_an_older_file(tmp_path):
     assert settings.iris == AxisSensitivity(x=-400.0, y=400.0)
     assert settings.tracking_source == Settings.defaults().tracking_source
     assert settings.movement_mode == Settings.defaults().movement_mode
+    assert settings.poll_ms == Settings.defaults().poll_ms
+
+
+def test_save_and_load_round_trip_includes_poll_ms(tmp_path):
+    path = tmp_path / "settings.json"
+    original = Settings(
+        iris=AxisSensitivity(x=-55.0, y=30.0), nose=AxisSensitivity(x=-500.0, y=250.0), poll_ms=5
+    )
+
+    save_settings(original, path)
+    loaded = load_settings(path)
+
+    assert loaded.poll_ms == 5

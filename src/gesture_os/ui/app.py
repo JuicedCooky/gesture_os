@@ -25,7 +25,10 @@ from gesture_os.recognizer import draw_debug_overlay as draw_hand_overlay
 from gesture_os.settings import AxisSensitivity, Settings, load_settings, save_settings
 from gesture_os.ui.calibration_window import CalibrationWindow
 
-_POLL_MS = 15  # UI tick interval; actual throughput is capped by camera FPS
+# Fallback used only if the "Tick interval" field holds something unusable
+# (blank, negative, non-numeric) — the real, user-adjustable value lives in
+# settings.poll_ms / self.poll_ms_var, not here.
+_DEFAULT_POLL_MS = 1
 
 
 class GestureOsApp:
@@ -104,6 +107,15 @@ class GestureOsApp:
         self.tracking_source_var.trace_add("write", self._update_sensitivity_visibility)
         self._update_sensitivity_visibility()
 
+        self.poll_ms_var = tk.IntVar(value=self.settings.poll_ms)
+        performance_frame = ttk.LabelFrame(self.root, text="Performance")
+        performance_frame.pack(fill="x", padx=4, pady=2)
+        ttk.Label(performance_frame, text="Tick interval (ms)", width=16).pack(side="left")
+        ttk.Entry(performance_frame, textvariable=self.poll_ms_var, width=8).pack(side="left")
+        ttk.Label(
+            performance_frame, text="lower = smoother, more CPU; 0-2 is usually plenty"
+        ).pack(side="left")
+
         save_frame = ttk.Frame(self.root)
         save_frame.pack(fill="x", padx=4, pady=2)
         self.settings_status_var = tk.StringVar(value="")
@@ -163,7 +175,18 @@ class GestureOsApp:
             image = ImageTk.PhotoImage(Image.fromarray(frame_rgb))
             self.video_label.configure(image=image)
             self.video_label.image = image  # keep a reference alive
-        self.root.after(_POLL_MS, self._tick)
+        self.root.after(self._poll_ms(), self._tick)
+
+    def _poll_ms(self) -> int:
+        """The current tick interval, read live so the "Tick interval"
+        field takes effect immediately — not just after "Save settings".
+        Not a fixed-rate timer: if a tick's own work (camera read + two
+        MediaPipe inferences + drawing) takes longer than this, that's the
+        real limit, not this number."""
+        try:
+            return max(0, self.poll_ms_var.get())
+        except tk.TclError:
+            return _DEFAULT_POLL_MS
 
     def _move_cursor(self, offset_x: float, offset_y: float) -> None:
         try:
@@ -205,14 +228,15 @@ class GestureOsApp:
 
     def _save_settings(self) -> None:
         """Saves everything the user can currently adjust: per-source
-        sensitivity, tracking source, and movement mode — so a session picks
-        up exactly where it left off next run."""
+        sensitivity, tracking source, movement mode, and tick interval — so
+        a session picks up exactly where it left off next run."""
         try:
             self.settings = Settings(
                 iris=AxisSensitivity(x=self.iris_x_var.get(), y=self.iris_y_var.get()),
                 nose=AxisSensitivity(x=self.nose_x_var.get(), y=self.nose_y_var.get()),
                 tracking_source=self.tracking_source_var.get(),
                 movement_mode=self.movement_mode_var.get(),
+                poll_ms=self.poll_ms_var.get(),
             )
         except tk.TclError:
             self.settings_status_var.set("invalid value(s) — not saved")
